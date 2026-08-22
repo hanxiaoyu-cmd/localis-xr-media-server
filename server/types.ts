@@ -1,0 +1,80 @@
+export type MediaKind = 'video' | 'audio';
+export type Projection = 'flat' | 'equirect180' | 'equirect360';
+export type StereoLayout = 'mono' | 'sbs' | 'tb';
+export type EyeOrder = 'lr' | 'rl';
+
+export interface MediaTrack {
+  index: number;
+  codec: string;
+  language?: string;
+  title?: string;
+  channels?: number;
+}
+
+export interface SubtitleTrack extends MediaTrack {
+  source: 'embedded' | 'external';
+  externalPath?: string;
+}
+
+export interface MediaItem {
+  id: string;
+  kind: MediaKind;
+  title: string;
+  fileName: string;
+  relativePath: string;
+  extension: string;
+  size: number;
+  modifiedAt: string;
+  duration: number;
+  width?: number;
+  height?: number;
+  frameRate?: number;
+  videoCodec?: string;
+  videoProfile?: string;
+  videoLevel?: number;
+  pixelFormat?: string;
+  audioCodec?: string;
+  container?: string;
+  projection: Projection;
+  stereo: StereoLayout;
+  eyeOrder: EyeOrder;
+  yawOffset: number;
+  audioTracks: MediaTrack[];
+  subtitleTracks: SubtitleTrack[];
+  directPlay: boolean;
+  path: string;
+  libraryRoot: string;
+}
+
+export type PublicMediaItem = Omit<MediaItem, 'path' | 'libraryRoot'> & {
+  streamUrl: string;
+  posterUrl?: string;
+  hlsUrl: string;
+};
+
+export interface LocalisConfig {
+  projectRoot: string;
+  dataDir: string;
+  cacheDir: string;
+  mediaDirs: string[];
+  port: number;
+  host: string;
+  frontendOrigin?: string;
+  authDisabled: boolean;
+  pairingCode: string;
+  tlsCertPath?: string;
+  tlsKeyPath?: string;
+  publicHostname?: string;
+  allowedHosts: string[];
+  ffmpegPath: string;
+  ffprobePath: string;
+  maxTranscodes: number;
+  maxCacheBytes?: number;
+}
+
+export interface PlaybackProgress {
+  mediaId: string;
+  position: number;
+  duration: number;
+  updatedAt: string;
+}
