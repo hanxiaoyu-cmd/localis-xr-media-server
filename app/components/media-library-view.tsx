@@ -645,7 +645,7 @@ export function MediaLibraryView() {
         <div className="page-heading">
           <div><p className="eyebrow">YOUR PRIVATE CINEMA</p><h1>晚上好，继续探索。</h1></div>
           {(server?.canPickLocalFolder || server?.canManageCloud) && <div className="library-actions">
-            {server?.canManageCloud && <button className="cloud-button" onClick={openCloudManager}><span aria-hidden="true">☁</span>连接云盘{server.cloudSourceCount > 0 ? ` · ${server.cloudSourceCount}` : ''}</button>}
+            {server?.canManageCloud && <button className="cloud-button" onClick={openCloudManager}><span className="cloud-icon" aria-hidden="true" />连接云盘{server.cloudSourceCount > 0 ? ` · ${server.cloudSourceCount}` : ''}</button>}
             {server?.canPickLocalFolder && <button className="add-button" onClick={() => { setFolderError(''); setFolderOpen(true); }}><span className="folder-icon" aria-hidden="true" />添加媒体文件夹</button>}
           </div>}
         </div>
@@ -661,7 +661,7 @@ export function MediaLibraryView() {
               <h2>{featured.title}</h2><p>{mediaLabel(featured)}</p>
               <div className="progress"><i style={{ width: `${featuredPercent}%` }} /></div>
               <div className="feature-actions">
-                <button className="primary-button" onClick={() => { window.location.href = `/watch/${featured.id}`; }}>▶ {featuredProgress ? '继续播放' : '开始播放'} <small>{featuredProgress ? formatDuration(featuredProgress.position) : formatDuration(featured.duration)}</small></button>
+                <button className="primary-button" onClick={() => { window.location.href = `/watch/${featured.id}`; }}><span className="play-symbol" aria-hidden="true" />{featuredProgress ? '继续播放' : '开始播放'} <small>{featuredProgress ? formatDuration(featuredProgress.position) : formatDuration(featured.duration)}</small></button>
                 <button className="circle-button" aria-label="刷新媒体信息" onClick={() => void refreshLibrary()}>↻</button>
               </div>
             </div>
@@ -681,11 +681,11 @@ export function MediaLibraryView() {
                   <button className={`poster ${posterTones[index % posterTones.length]} ${item.kind === 'audio' ? 'audio-poster' : ''}`} aria-label={`播放 ${item.title}`} onClick={() => { window.location.href = `/watch/${item.id}`; }}>
                     {item.posterUrl && <img loading="lazy" src={item.posterUrl} alt="" />}
                     <span className="poster-index">{item.projection === 'equirect180' ? '180°' : item.projection === 'equirect360' ? '360°' : item.kind === 'audio' ? 'AUDIO' : String(index + 1).padStart(2, '0')}</span>
-                    <span className="play-disc">▶</span>
+                    <span className="play-disc"><i className="play-symbol" aria-hidden="true" /></span>
                     {percent > 0 && <span className="card-progress"><i style={{ width: `${percent}%` }} /></span>}
                   </button>
                   <h3>{item.title}</h3><p>{mediaLabel(item)}</p>
-                  {item.sourceType !== 'local' && <span className="cloud-source-badge">☁ {item.sourceType === 'baidu' ? '百度网盘' : '夸克 / WebDAV'}</span>}
+                  {item.sourceType !== 'local' && <span className="cloud-source-badge"><i className="cloud-icon" aria-hidden="true" />{item.sourceType === 'baidu' ? '百度网盘' : '夸克 / WebDAV'}</span>}
                 </article>
               );
             })}

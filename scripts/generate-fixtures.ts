@@ -29,6 +29,13 @@ run('普通 H.264/AAC 视频', [
   '-pix_fmt', 'yuv420p', '-g', '60', '-c:a', 'aac', '-b:a', '128k', '-shortest', 'flat-demo.mp4',
 ]);
 
+run('可跳转长片样本', [
+  '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24',
+  '-f', 'lavfi', '-i', 'sine=frequency=510:sample_rate=48000',
+  '-t', '12', '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264', '-preset', 'ultrafast',
+  '-pix_fmt', 'yuv420p', '-g', '48', '-c:a', 'aac', '-b:a', '96k', '-shortest', 'seekable-long.mp4',
+]);
+
 run('VR180 SBS 视频', [
   '-f', 'lavfi', '-i', 'color=c=0x8a4fff:size=640x640:rate=30',
   '-f', 'lavfi', '-i', 'color=c=0x46c7da:size=640x640:rate=30',

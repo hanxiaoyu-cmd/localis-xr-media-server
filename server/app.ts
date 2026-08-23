@@ -457,11 +457,27 @@ export function createApiApp(deps: AppDependencies) {
       if (!level) return;
       // Reject malformed asset names before creating an expensive FFmpeg job.
       // Express decodes route params, so this also covers encoded traversal forms.
-      if (!/^(index\.m3u8|init\.mp4|seg_\d{6}\.m4s)$/.test(String(req.params.file))) {
+      if (!/^(index\.m3u8|init\.mp4|seg_\d{6}\.(?:m4s|ts))$/.test(String(req.params.file))) {
         return res.status(404).json({ error: 'hls_asset_not_found' });
       }
       let job: TranscodeJob | undefined;
       let releaseCloudLease: (() => void) | undefined;
+      let releaseSegmentCloudLease: (() => void) | undefined;
+      if (String(req.params.file).endsWith('.ts') && item.sourceType !== 'local') {
+        if (!clouds) throw new CloudSourceError('cloud_manager_unavailable', '云盘管理器尚未启动。', 503);
+        const cacheJob = clouds.ensureCached(item);
+        if (cacheJob.state !== 'ready') {
+          return res.status(503).set('Retry-After', '1').json({
+            error: 'cloud_cache_not_ready',
+            message: '云盘本地副本正在恢复，请稍后重试分片。',
+          });
+        }
+        releaseSegmentCloudLease = clouds.acquireCacheLease(cacheJob.path);
+        try { item = await clouds.localizedItem(item, cacheJob); } catch (error) {
+          releaseSegmentCloudLease();
+          throw error;
+        }
+      }
       if (req.params.file === 'index.m3u8') {
         if (item.sourceType !== 'local') {
           if (!clouds) throw new CloudSourceError('cloud_manager_unavailable', '云盘管理器尚未启动。', 503);
@@ -507,11 +523,22 @@ export function createApiApp(deps: AppDependencies) {
           }
         }
       } else job = transcodes.jobForItem(item, level);
-      if (!job) return res.status(404).json({ error: 'hls_asset_not_ready' });
+      if (!job) {
+        releaseSegmentCloudLease?.();
+        return res.status(404).json({ error: 'hls_asset_not_ready' });
+      }
       if (req.params.file === 'index.m3u8' && !await transcodes.waitForPlaylist(job, 5_000)) {
         return res.status(202).set('Retry-After', '1').json({ state: job.state, stage: 'transcode', progressSeconds: job.progressSeconds });
       }
-      const asset = transcodes.resolveAsset(job, String(req.params.file));
+      const requestedFile = String(req.params.file);
+      let asset: string | undefined;
+      try {
+        asset = requestedFile.endsWith('.ts')
+          ? await transcodes.ensureOnDemandSegment(job, item, requestedFile)
+          : transcodes.resolveAsset(job, requestedFile);
+      } finally {
+        releaseSegmentCloudLease?.();
+      }
       if (!asset) return res.status(404).json({ error: 'hls_asset_not_found' });
       try { await access(asset); } catch { return res.status(404).json({ error: 'hls_asset_not_ready' }); }
       res.set({

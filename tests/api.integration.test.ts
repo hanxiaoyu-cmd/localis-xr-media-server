@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -175,17 +175,16 @@ describe('Localis API', () => {
     expect(deps.transcodes.decideMode(item, 'standard')).toBe('transcode');
 
     await host(request(api).get(`/api/media/${item.id}/hls/standard/index.m3u8`)).expect(200);
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      if (deps.transcodes.statusForItem(item, 'standard').state === 'ready') break;
-      await wait(100);
-    }
+    const standardSegment = await host(request(api).get(`/api/media/${item.id}/hls/standard/seg_000000.ts`)).expect(200);
+    expect(standardSegment.headers['content-type']).toContain('video/mp2t');
     expect(deps.transcodes.statusForItem(item, 'standard')).toMatchObject({
       state: 'ready', mode: 'transcode', superResolution: 'standard',
+      strategy: 'on-demand', seekable: true, generationState: 'complete',
       plan: { outputWidth: plan.outputWidth, outputHeight: plan.outputHeight },
     });
     const job = deps.transcodes.jobForItem(item, 'standard')!;
     const { stdout } = await execFileAsync('ffprobe', [
-      '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,codec_name,pix_fmt,level', '-of', 'json', job.playlistPath,
+      '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,codec_name,pix_fmt,level', '-of', 'json', path.join(job.directory, 'seg_000000.ts'),
     ], { windowsHide: true });
     const encoded = (JSON.parse(stdout) as { streams: Array<{ width: number; height: number; codec_name: string; pix_fmt: string; level: number }> }).streams[0];
     expect(encoded)
@@ -196,17 +195,45 @@ describe('Localis API', () => {
     const spherical = deps.library.get(deps.library.list().find((candidate) => candidate.title === 'demo-360-mono')!.id)!;
     const sphericalPlan = serverSuperResolutionPlan(spherical, 'high');
     await host(request(api).get(`/api/media/${spherical.id}/hls/high/index.m3u8`)).expect(200);
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      if (deps.transcodes.statusForItem(spherical, 'high').state === 'ready') break;
-      await wait(100);
-    }
+    await host(request(api).get(`/api/media/${spherical.id}/hls/high/seg_000000.ts`)).expect(200);
     const sphericalJob = deps.transcodes.jobForItem(spherical, 'high')!;
     expect(sphericalJob.state).toBe('ready');
     const sphericalProbe = await execFileAsync('ffprobe', [
-      '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', sphericalJob.playlistPath,
+      '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', path.join(sphericalJob.directory, 'seg_000000.ts'),
     ], { windowsHide: true });
     expect((JSON.parse(sphericalProbe.stdout) as { streams: Array<{ width: number; height: number }> }).streams[0])
       .toMatchObject({ width: sphericalPlan.outputWidth, height: sphericalPlan.outputHeight });
+  });
+
+  it('publishes a full-duration VOD timeline immediately and generates a far seek segment first', async () => {
+    const item = deps.library.get(deps.library.list().find((candidate) => candidate.title === 'seekable-long')!.id)!;
+    const startedAt = Date.now();
+    const playlist = await host(request(api).get(`/api/media/${item.id}/hls/standard/index.m3u8`)).expect(200);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(playlist.text).toContain('#EXT-X-PLAYLIST-TYPE:VOD');
+    expect(playlist.text).toContain('seg_000000.ts');
+    expect(playlist.text).toContain('seg_000002.ts');
+    expect(playlist.text.match(/#EXTINF:/g)).toHaveLength(3);
+
+    const farSegment = await host(request(api).get(`/api/media/${item.id}/hls/standard/seg_000002.ts`)).expect(200);
+    expect(farSegment.headers['content-type']).toContain('video/mp2t');
+    const status = deps.transcodes.statusForItem(item, 'standard');
+    expect(status).toMatchObject({
+      state: 'ready', strategy: 'on-demand', seekable: true,
+      generatedSegments: 1, totalSegments: 3,
+    });
+    expect(status.progressPercent).toBeGreaterThan(30);
+    expect(status.progressPercent).toBeLessThan(40);
+
+    const job = deps.transcodes.jobForItem(item, 'standard')!;
+    expect(await access(path.join(job.directory, 'seg_000002.ts')).then(() => true)).toBe(true);
+    await expect(access(path.join(job.directory, 'seg_000000.ts'))).rejects.toBeTruthy();
+    const probe = await execFileAsync('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=start_time,duration', '-of', 'json', path.join(job.directory, 'seg_000002.ts'),
+    ], { windowsHide: true });
+    const format = (JSON.parse(probe.stdout) as { format: { start_time: string; duration: string } }).format;
+    expect(Number(format.start_time)).toBeGreaterThanOrEqual(7.5);
+    expect(Number(format.duration)).toBeGreaterThan(3.5);
   });
 
   it('reports an explicit unavailable state instead of downsampling an unsafe enhanced source', async () => {
@@ -441,6 +468,7 @@ describe('Localis API', () => {
     });
     try {
       await host(request(isolatedApi).get(`/api/media/${source.id}/hls/high/index.m3u8`)).expect(200);
+      await host(request(isolatedApi).get(`/api/media/${source.id}/hls/high/seg_000000.ts`)).expect(200);
       expect(transcodes.jobs.has(staleKey)).toBe(false);
       expect(transcodes.jobForItem(source, 'high')).toBeTruthy();
     } finally {

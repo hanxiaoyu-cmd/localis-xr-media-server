@@ -2,7 +2,7 @@
 
 Localis 是运行在电脑上的私有局域网媒体站。Vision Pro、Quest 和 PICO 不需要安装任何程序，只需用头显自带浏览器打开电脑显示的局域网网址，即可播放本地视频、音频、VR180 与 VR360。
 
-普通文件通过 HTTP Range 直读；浏览器不兼容的媒体以及所有超分档位，由电脑上的 FFmpeg 生成 H.264/AAC fMP4 HLS。头显只解码最终视频，不再运行 WebGL 超分画布，因此不会再出现“画面卡住但字幕仍在动”的设备端超分故障。
+普通文件通过 HTTP Range 直读；浏览器不兼容的媒体由电脑上的 FFmpeg 生成 H.264/AAC HLS。所有超分档位使用覆盖整部影片的可跳转 VOD 时间线，浏览器拖到哪里，电脑就优先生成并缓存哪里的 4 秒 H.264/AAC 分片，不再要求长片从 00:00 顺序算到目标位置。头显只解码最终视频，不运行 WebGL 超分画布，因此不会再出现“画面卡住但字幕仍在动”的设备端超分故障。
 
 ```text
 电脑文件夹 ───────────────┐
@@ -16,7 +16,7 @@ Localis 是运行在电脑上的私有局域网媒体站。Vision Pro、Quest �
 - 递归扫描 MP4、MOV、MKV、WebM、AVI、WMV、TS/M2TS、MPG/MPEG、VOB、3GP、MXF 等视频，以及 MP3、M4A、AAC、FLAC、ALAC、WAV、OGG、OPUS、AIFF、AC3/EAC3、DTS 等音频。
 - Range 直放，支持固定、开放尾部和 suffix Range、`HEAD`、`If-Range` 与 `416`。
 - 原文件直放、无损 HLS remux、仅转音频、H.264/AAC 完整转码四条兼容路径。
-- 启动时真实探测 NVENC、Media Foundation、libx264；相同任务 single-flight，失败自动回退，输出按源版本和超分档位独立缓存。
+- 启动时真实探测 NVENC、Media Foundation、libx264；相同任务 single-flight，失败自动回退，输出按源版本、超分档位和 4 秒分片独立缓存。
 - 电脑端四档空间超分：关闭、标准最多 1.25×、高最多 1.5×、极致最多 2×；Vision Pro/Quest/PICO 端完全不承担超分计算。
 - SBS/TB 在电脑端按每只眼独立重建，避免眼间边界串色；360° 使用 FFmpeg `v360` 的环绕采样保持经度接缝连续。
 - 外挂 SRT/VTT/ASS/SSA 与内封文本字幕统一转换成 WebVTT。
@@ -92,7 +92,7 @@ npm run start:local
 
 倍率和像素数是“最多放大多少”，不是强制输出尺寸。标准/高/极致不会把高分辨率原片反向缩小：源画面已达到档位预算时保持 1×，只做安全锐化；源尺寸或像素率本身超过 H.264 Level 5.2 时，该超分档明确返回不可用，并提示改用原片或 HEVC。当前引擎是 FFmpeg 的高质量空间缩放与对比度自适应锐化，不是神经网络，也不会伪称恢复源视频中不存在的真实细节。本机实测采用 CPU `zscale/CAS` 滤镜加 NVENC 编码；没有 NVENC 时会自动回退 Media Foundation 或 libx264。极致档会增加首播等待、缓存占用和电脑负载。
 
-播放器始终保留原生 `<video controls>`。WebXR 直接使用电脑生成的视频纹理；设备上没有额外超分 render target。切换档位时会尽量恢复原播放位置和播放状态。
+视频播放器使用统一绿色控制条，不依赖会因平台字体而变成 emoji 的字符图标。时间轴始终以原片完整时长为范围；跳到尚未缓存的位置时，Localis 直接从该时间点附近启动电脑端 FFmpeg，而不是等待前面的内容。界面分别显示当前 4 秒分片的生成进度、处理倍速和整片缓存覆盖率。WebXR 直接使用电脑生成的视频纹理；设备上没有额外超分 render target。切换档位时会恢复原播放位置和播放状态。
 
 ## 连接云盘
 
@@ -188,7 +188,7 @@ npm run start:local
 | H.264/AAC 位于 MKV/TS 等容器 | fMP4 HLS remux，不重编码 |
 | H.264 + 不兼容音频 | 复制视频，仅转 AAC 音频 |
 | MPEG-4 Part 2、VC-1 等不兼容视频 | H.264/AAC HLS |
-| 任意视频且超分为标准/高/极致 | 电脑端缩放锐化 + H.264/AAC HLS |
+| 任意视频且超分为标准/高/极致 | 电脑端按需 4 秒缩放锐化分片 + 可全片 seek 的 H.264/AAC MPEG-TS VOD HLS |
 | SRT/VTT/ASS/SSA 文本字幕 | WebVTT |
 
 “所有种类”只能通过兼容转码尽量覆盖。首版不处理 DRM、蓝光菜单/加密光盘、PGS/VobSub 位图字幕 OCR 或专有加密容器；Apple 空间视频应优先尝试原文件播放。4K/6K/8K 与 HDR 的最终效果取决于电脑编码能力、Wi-Fi 吞吐和头显解码器。
@@ -226,7 +226,7 @@ npm test
 npm run build
 ```
 
-当前自动化为 12 个文件、58 项测试，覆盖扫描与路径隐藏、配对、Range、字幕、原生选择器协议、Safari/Chromium HLS 分流、四档电脑端超分规划、SBS/TB 眼间隔离、H.264 Level 5.2 安全范围、真实 FFmpeg HLS、任务租约与回收、硬配额缓存、OpenList WebDAV、百度电脑端加密设置与 OAuth/分页/Range 协议模拟，以及夸克官方 CLI 的版本门禁、artifact、流式进度、不透明结果、完整下载、容量监控、ffprobe 与原子入库。生产构建还在真实 Chromium 中验证了云盘弹窗布局、百度首次设置、夸克安装后授权入口、LAN 页面无云盘按钮、LAN 管理 API 返回 403 与控制台无错误。
+当前自动化为 12 个文件、59 项测试，覆盖扫描与路径隐藏、配对、Range、字幕、原生选择器协议、Safari/Chromium HLS 分流、四档电脑端超分规划、完整时长 VOD 清单、远距离分片优先生成、SBS/TB 眼间隔离、H.264 Level 5.2 安全范围、真实 FFmpeg HLS、任务租约与回收、硬配额缓存、OpenList WebDAV、百度电脑端加密设置与 OAuth/分页/Range 协议模拟，以及夸克官方 CLI 的版本门禁、artifact、流式进度、不透明结果、完整下载、容量监控、ffprobe 与原子入库。生产构建还在真实 Chromium 中验证了绿色播放器、两小时电影从 10:36 跳到 1:46:32 后继续播放、云盘弹窗布局、LAN 页面管理边界与控制台无错误。
 
 详细记录见 [测试报告](./docs/TEST_REPORT.md)，真机步骤见 [头显验收清单](./docs/HEADSET_ACCEPTANCE.md)。真实 Vision Pro/Quest/PICO、真实夸克账户与真实百度账号仍需由拥有这些设备和凭据的用户完成清单，项目不会把模拟结果冒充真机结果。
 

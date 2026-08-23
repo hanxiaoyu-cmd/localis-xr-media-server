@@ -1,6 +1,6 @@
 # Localis 实际测试报告
 
-测试日期：2026-08-23（Asia/Shanghai）
+测试日期：2026-08-24（Asia/Shanghai）
 
 ## 环境
 
@@ -17,18 +17,19 @@
 | --- | --- | --- |
 | ESLint | 通过 | 全项目无 lint 错误或警告 |
 | TypeScript | 通过 | `tsc --noEmit` |
-| 单元/集成 | 12 个文件、58 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、电脑端超分、真实转码、电脑端云盘工作台、云盘协议与安全边界 |
+| 单元/集成 | 12 个文件、59 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、完整时长 seek、电脑端超分、真实转码、电脑端云盘工作台、云盘协议与安全边界 |
 | 生产构建 | 通过 | Vinext 五阶段 client/RSC/SSR 构建 |
 | 编码器探测 | 通过 | NVENC、Media Foundation、libx264 运行时真实编码探测；本机自动选择 NVENC |
 | NVENC 路径 | 通过 | 完整集成套件真实生成 H.264/yuv420p + AAC fMP4 HLS |
-| Media Foundation 路径 | 17/17 通过 | 强制 `h264_mf` 后完整 API 集成测试通过 |
-| libx264 路径 | 17/17 通过 | 强制 `libx264` 后完整 API 集成测试通过 |
+| Media Foundation 路径 | 18/18 通过 | 强制 `h264_mf` 后完整 API 集成测试通过，含远距离按需分片 |
+| libx264 路径 | 18/18 通过 | 强制 `libx264` 后完整 API 集成测试通过，含远距离按需分片 |
 | 电脑端超分规划 | 8/8 通过 | 四档解析、绝不反向缩小、Level 5.2、安全像素率、SAR、SBS/TB 拆眼、360 接缝与 60 fps 上限 |
-| 标准档真实 HLS | 通过 | 1280×720 → 1600×900，FFprobe 确认为 H.264/yuv420p，非关闭档强制电脑转码 |
-| 高档真实页面 | 通过 | 1280×720 → 1920×1080，生产浏览器加载 `/hls/high/index.m3u8` |
+| 标准档真实 HLS | 通过 | 1280×720 → 1600×900，按需 MPEG-TS 分片经 FFprobe 确认为 H.264/yuv420p，非关闭档强制电脑转码 |
+| 完整时长远距离 seek | 通过 | 12 秒三分片 VOD 清单立即返回；不请求片头，先请求最后一段并验证时间戳从 8 秒附近开始 |
+| 高档真实页面 | 通过 | 生产浏览器加载 `/hls/high/index.m3u8`，绿色播放器和超分缓存进度正确显示 |
 | VR360 高档 HLS | 通过 | 真实 1280×640 equirect360 经 `v360` 环绕采样输出 1920×960，避免水平接缝钳制 |
-| 设备端超分移除 | 通过 | `.super-resolution-canvas` 为 0；唯一 canvas 是隐藏的 XR stage，普通播放保留原生 `<video controls>` |
-| 连续播放 | 通过 | 标准档与高档均为 `readyState=4`；分别观察到媒体时间推进至 2.13 秒和 2.19 秒且仍在播放 |
+| 设备端超分移除 | 通过 | `.super-resolution-canvas` 为 0；唯一 canvas 是隐藏的 XR stage，视频使用无 emoji 的绿色 HTML 控制条 |
+| 长片跳转后连续播放 | 通过 | 真实 2:22:03 电影从 10:36 直接跳到 1:46:32，高档超分生成目标分片后播放推进到 1:46:37，`readyState=4`、无媒体错误 |
 | HLS 浏览器分流 | 3/3 通过 | Vision Pro/Apple Safari 保留原生 HLS；Quest/PICO/桌面 Chromium 优先 hls.js；无 MediaSource 时安全回退 |
 | OpenList/WebDAV | 通过 | 真实本机 mock HTTP 服务：Depth 1 的 207 XML、嵌套目录、自身目录去重、越界 href 过滤、Basic Auth、Range、完整缓存 |
 | WebDAV 安全边界 | 通过 | 拒绝远程地址与 URL 内嵌凭据；存储 JSON 中无明文密码；重启后可用密钥解密并重新扫描 |
@@ -40,9 +41,9 @@
 | 百度凭据保护 | 通过 | connector 与授权来源均不含 AppKey、SecretKey、Access/Refresh Token 明文；v1 明文 AppKey 自动迁移；损坏 key 文件安全失败且不会被覆盖 |
 | 云盘媒体脱敏 | 通过 | 公共媒体 JSON 不含 `remoteFileId`、OpenList 地址或本机上游端口 |
 | 云盘缓存 | 通过 | 默认串行下载、50 GB 可配置硬配额、磁盘余量保护、`507`、原子重命名、崩溃 `.part` 清理及持久缓存清单 |
-| 云盘 → 电脑超分 | 通过 | WebDAV 提供真实 1280×720 MP4，电脑完整缓存并 ffprobe 后生成 1600×900 Standard HLS；后续分片命中同一任务 |
+| 云盘 → 电脑超分 | 通过 | WebDAV 提供真实 1280×720 MP4，电脑完整缓存并 ffprobe 后按需生成 1600×900 Standard HLS 分片；后续请求命中同一缓存 |
 | Windows 原生文件夹选择器 | 通过 | 真实系统窗口的取消、选中、自动重新扫描；中文路径另有单元测试 |
-| 本机/局域网管理边界 | 通过 | `localhost` 显示文件夹与云盘按钮；LAN 页面两类按钮数量均为 0，23 个媒体仍正常展示；LAN 云盘管理 API 返回 403 |
+| 本机/局域网管理边界 | 通过 | `localhost` 显示文件夹与云盘按钮；LAN 页面两类按钮数量均为 0，24 个媒体仍正常展示；LAN 云盘管理 API 返回 403 |
 | 原文件播放 | 通过 | 1280×720 H.264/AAC MP4 Range 直连，`readyState=4` |
 | HLS 兼容播放 | 通过 | AVI/MPEG-4 Part 2 + PCM 转 H.264/AAC，浏览器可播放 |
 | 字幕 | 通过 | 中文 SRT 转 WEBVTT，普通播放器加载同源 `<track>` |
@@ -53,12 +54,14 @@
 
 ### HLS 输出实测
 
-API 集成测试不是模拟 FFmpeg。它请求真实 HLS 路径、等待分片生成，再对播放列表运行 ffprobe，断言：
+API 集成测试不是模拟 FFmpeg。兼容流请求真实 fMP4 HLS；超分流先取得覆盖整片的 VOD 清单，再直接请求目标 MPEG-TS 分片并运行 ffprobe，断言：
 
 ```text
 video: h264, yuv420p
 audio: aac
-playlist: EXT-X-MAP + EXT-X-ENDLIST
+compatibility playlist: EXT-X-MAP + EXT-X-ENDLIST
+super-resolution playlist: EXT-X-PLAYLIST-TYPE:VOD + full-duration EXTINF entries
+far seek: request seg_000002.ts before seg_000000.ts
 standard SR: 1280x720 -> 1600x900
 ```
 
@@ -70,7 +73,7 @@ standard SR: 1280x720 -> 1600x900
 - 120 fps → 不超过 60 fps。
 - SBS 与 TB 每只眼独立缩放和锐化，滤镜图不会跨眼取样。
 - `off`、`standard`、`high`、`ultra` 使用不同缓存键。
-- 旧 HLS 缓存不会污染 `v5-server-sr-safe` 管线。
+- 旧 HLS 缓存不会污染 `v6-seekable-on-demand-sr` 管线。
 - 两个同时转码槽被占满时返回 `503 + Retry-After`，释放后可重试。
 - 播放者持有 60 秒共享租约；页面放弃后由 15 秒清理器停止过期 FFmpeg，活跃请求不会被误杀。
 
@@ -101,6 +104,7 @@ standard SR: 1280x720 -> 1600x900
 7. Chromium 的 `canPlayType` 在此环境声称可原生播放 HLS，但实际点击后曾出现 `DEMUXER_ERROR_COULD_NOT_PARSE`。现在只有 Apple Safari（含 Vision Pro）优先原生 HLS；Quest/PICO 与桌面 Chromium 优先 hls.js，生产页面复验为 blob MediaSource、无媒体错误且时间实际推进。
 8. 原云盘窗口把百度应用身份和 OpenList 参数都当作日常导入步骤。现在百度只在电脑端首次设置并加密保存，之后直接扫码；夸克改用官方组件在电脑浏览器 OAuth，再在电脑上搜索和完整下载，不把第三方明文换票链路包装成快捷登录。
 9. 云盘弹窗新增多阶段表单后，过宽的 CSS 后代选择器曾把整个弹窗根节点变成横向 flex。真实浏览器截图发现后已把规则限定到具体表单，百度与夸克页面重新截图复验布局正常。
+10. 顺序 EVENT HLS 只暴露已转码到的时间范围，Vision Pro 选择超分后无法拖到长片后段。现在非关闭档立即发布完整 VOD 时间线，Safari/HLS 请求哪个 4 秒分片，电脑就从对应时间点优先生成；绿色控制条同时显示当前分片进度、处理倍速和总缓存覆盖率。真实 2:22:03 电影已从 10:36 跳到 1:46:32 并继续播放。
 
 ## 尚未声称通过
 

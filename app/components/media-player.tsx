@@ -2,7 +2,7 @@
 /* eslint-disable @next/next/no-html-link-for-pages -- Vinext currently duplicates React context when next/link is optimized in development. */
 
 import Hls from 'hls.js';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { PlaybackProgress, PublicMediaItem } from '@/server/types';
 import type { ServerSuperResolutionLevel, ServerSuperResolutionPlan } from '@/server/super-resolution';
 import { XrVideoStage, type XrDiagnostics, type XrVideoOptions } from '@/app/lib/xr-video-stage';
@@ -16,6 +16,18 @@ interface TranscodeStatus {
   error?: string;
   superResolution: ServerSuperResolutionLevel;
   plan: ServerSuperResolutionPlan;
+  durationSeconds?: number;
+  progressPercent?: number;
+  speed?: number;
+  etaSeconds?: number;
+  activeSegmentPercent?: number;
+  activeSegmentStartSeconds?: number;
+  activeEtaSeconds?: number;
+  generatedSegments?: number;
+  totalSegments?: number;
+  generationState?: 'waiting' | 'processing' | 'complete' | 'failed';
+  strategy?: 'eager' | 'on-demand';
+  seekable?: boolean;
 }
 
 interface MediaResponse {
@@ -34,7 +46,9 @@ async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
 function clock(seconds: number) {
   if (!Number.isFinite(seconds)) return '0:00';
   const whole = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(whole / 3_600);
   const minutes = Math.floor(whole / 60);
+  if (hours > 0) return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`;
   return `${minutes}:${String(whole % 60).padStart(2, '0')}`;
 }
 
@@ -63,6 +77,8 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
   const resumePosition = useRef<number | undefined>(undefined);
   const resumePlaying = useRef(false);
   const resumeRetryTimer = useRef<number | undefined>(undefined);
+  const seekCommitTimer = useRef<number | undefined>(undefined);
+  const scrubTargetRef = useRef<number | undefined>(undefined);
   const xrOptionsRef = useRef<XrVideoOptions>({ projection: 'flat', stereo: 'mono', eyeOrder: 'lr', yawOffset: 0 });
   const [data, setData] = useState<MediaResponse>();
   const [transport, setTransport] = useState<'direct' | 'hls'>('hls');
@@ -73,6 +89,8 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
   const [diagnostics, setDiagnostics] = useState<XrDiagnostics>();
   const [superResolution, setSuperResolution] = useState<ServerSuperResolutionLevel>(() => savedSuperResolution());
   const [serverEnhancement, setServerEnhancement] = useState<TranscodeStatus>();
+  const [playback, setPlayback] = useState({ paused: true, currentTime: 0, duration: 0, muted: false });
+  const [scrubTarget, setScrubTarget] = useState<number>();
 
   const load = useCallback(async () => {
     try {
@@ -164,18 +182,23 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
           if (!controller.signal.aborted) setServerEnhancement(transcodeStatus);
           if (hlsTransport === 'native') {
             video.src = hlsUrl;
-            setStatus(superResolution === 'off' ? 'Safari 原生 HLS 兼容流' : `Safari 播放电脑端${superResolutionLabel(superResolution)}超分流`);
+            setStatus(superResolution === 'off' ? 'Safari 原生 HLS 兼容流' : `电脑端${superResolutionLabel(superResolution)}超分 · 可拖动`);
           } else {
             const hls = new Hls({
               enableWorker: true,
               lowLatencyMode: false,
               backBufferLength: 60,
+              maxBufferLength: 12,
+              maxMaxBufferLength: 30,
+              startFragPrefetch: true,
+              fragLoadingTimeOut: 120_000,
+              fragLoadingMaxRetry: 2,
               xhrSetup: (xhr) => { xhr.withCredentials = true; },
             });
             hlsRef.current = hls;
             hls.loadSource(hlsUrl);
             hls.attachMedia(video);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => setStatus(superResolution === 'off' ? 'HLS 兼容流已就绪' : `电脑端${superResolutionLabel(superResolution)}超分流已就绪`));
+            hls.on(Hls.Events.MANIFEST_PARSED, () => setStatus(superResolution === 'off' ? 'HLS 兼容流已就绪' : `电脑端${superResolutionLabel(superResolution)}超分 · 可拖动`));
             hls.on(Hls.Events.ERROR, (_event, info) => {
               if (info.fatal) setError(`HLS 播放失败：${info.details}`);
             });
@@ -195,6 +218,37 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
       hlsRef.current = undefined;
     };
   }, [hlsUrl, mediaItemId, mediaItemKind, mediaProjection, mediaStereo, streamUrl, superResolution, transport]);
+
+  useEffect(() => {
+    if (!mediaItemId || mediaItemKind !== 'video' || transport !== 'hls') return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const response = await fetch(
+          `/api/media/${mediaItemId}/hls/${superResolution}/status`,
+          { credentials: 'include', cache: 'no-store', signal: controller.signal },
+        );
+        if (response.ok) {
+          const next = await response.json() as TranscodeStatus;
+          if (!controller.signal.aborted) setServerEnhancement(next);
+        }
+      } catch {
+        // The manifest request reports actionable errors. Status polling is
+        // intentionally quiet so a brief Wi-Fi pause does not cover playback.
+      }
+      if (!controller.signal.aborted) timer = window.setTimeout(poll, superResolution === 'off' ? 2_000 : 750);
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [mediaItemId, mediaItemKind, superResolution, transport]);
+
+  useEffect(() => () => {
+    if (seekCommitTimer.current !== undefined) window.clearTimeout(seekCommitTimer.current);
+  }, []);
 
   const xrItem = data?.item;
   const xrMediaId = xrItem?.id;
@@ -263,14 +317,20 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
     const video = videoRef.current;
     const switchedPosition = resumePosition.current;
     const saved = switchedPosition ?? data?.progress?.position;
-    setStatus(transport === 'direct' ? '原始文件直连' : superResolution === 'off' ? '兼容流已就绪' : `电脑端${superResolutionLabel(superResolution)}超分流已就绪`);
+    setStatus(transport === 'direct' ? '原始文件直连' : superResolution === 'off' ? '兼容流已就绪' : `电脑端${superResolutionLabel(superResolution)}超分 · 可拖动`);
+    if (video) setPlayback({
+      paused: video.paused,
+      currentTime: video.currentTime,
+      duration: Math.max(Number.isFinite(video.duration) ? video.duration : 0, data?.item.duration ?? 0),
+      muted: video.muted,
+    });
     const attemptResume = () => {
       if (!video || !saved || saved <= 0) {
         resumePosition.current = undefined;
         resumePlaying.current = false;
         return;
       }
-      let seekable = transport === 'direct';
+      let seekable = transport === 'direct' || (transport === 'hls' && superResolution !== 'off');
       for (let index = 0; index < video.seekable.length; index += 1) {
         if (saved >= video.seekable.start(index) - 0.25 && saved <= video.seekable.end(index) + 0.25) {
           seekable = true;
@@ -290,6 +350,61 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
     };
     attemptResume();
     if (stageRef.current) setDiagnostics(stageRef.current.diagnostics());
+  };
+
+  const syncPlayback = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    setPlayback({
+      paused: video.paused,
+      currentTime: video.currentTime,
+      duration: Math.max(Number.isFinite(video.duration) ? video.duration : 0, data?.item.duration ?? 0),
+      muted: video.muted,
+    });
+  };
+
+  const commitSeek = (target = scrubTargetRef.current) => {
+    const video = videoRef.current;
+    if (!video || target === undefined || !Number.isFinite(target)) return;
+    if (seekCommitTimer.current !== undefined) window.clearTimeout(seekCommitTimer.current);
+    seekCommitTimer.current = undefined;
+    const duration = Math.max(playback.duration, data?.item.duration ?? 0);
+    const next = Math.max(0, Math.min(target, Math.max(0, duration - 0.05)));
+    video.currentTime = next;
+    setPlayback((current) => ({ ...current, currentTime: next }));
+    if (superResolution !== 'off') setStatus(`正在优先生成 ${clock(next)} 的电脑端超分分片…`);
+  };
+
+  const previewSeek = (target: number) => {
+    scrubTargetRef.current = target;
+    setScrubTarget(target);
+    if (seekCommitTimer.current !== undefined) window.clearTimeout(seekCommitTimer.current);
+    seekCommitTimer.current = window.setTimeout(() => commitSeek(target), 180);
+  };
+
+  const togglePlayback = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) void video.play().catch((cause) => setError(cause instanceof Error ? cause.message : '无法开始播放'));
+    else video.pause();
+  };
+
+  const toggleMute = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = !video.muted;
+    syncPlayback();
+  };
+
+  const enterFullscreen = async () => {
+    const video = videoRef.current;
+    const stage = video?.closest('.video-stage') as HTMLElement | null;
+    try {
+      if (stage?.requestFullscreen) await stage.requestFullscreen();
+      else (video as HTMLVideoElement & { webkitEnterFullscreen?: () => void })?.webkitEnterFullscreen?.();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法进入全屏');
+    }
   };
 
   const changeSuperResolution = (level: ServerSuperResolutionLevel) => {
@@ -361,11 +476,30 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
   if (error && !data) return <main className="player-error"><h1>无法打开媒体</h1><p>{error}</p><a href="/">返回媒体库</a></main>;
   if (!data) return <main className="player-loading"><span className="brand-mark large"><i /></span><p>{status}</p></main>;
   const { item } = data;
+  const playbackDuration = Math.max(playback.duration, item.duration || 0);
+  const displayedTime = scrubTarget ?? playback.currentTime;
+  const playbackPercent = playbackDuration > 0 ? Math.min(100, Math.max(0, displayedTime / playbackDuration * 100)) : 0;
+  const enhancementPercent = Math.min(100, Math.max(0, serverEnhancement?.progressPercent ?? 0));
+  const activeEnhancementPercent = Math.min(100, Math.max(0, serverEnhancement?.activeSegmentPercent ?? 0));
+  const displayedEnhancementPercent = serverEnhancement?.generationState === 'processing'
+    ? activeEnhancementPercent
+    : enhancementPercent;
+  const enhancementPercentLabel = enhancementPercent > 0 && enhancementPercent < 1
+    ? '<1%'
+    : `${enhancementPercent < 10 ? enhancementPercent.toFixed(1) : enhancementPercent.toFixed(0)}%`;
+  const playbackTrackStyle = { '--range-progress': `${playbackPercent}%` } as CSSProperties;
+  const enhancementTrackStyle = { '--generation-progress': `${displayedEnhancementPercent}%` } as CSSProperties;
+  const enhancementSpeed = serverEnhancement?.speed && serverEnhancement.speed > 0.01
+    ? `${serverEnhancement.speed.toFixed(1)}×`
+    : undefined;
+  const enhancementEta = serverEnhancement?.activeEtaSeconds && serverEnhancement.activeEtaSeconds > 1
+    ? `约 ${clock(serverEnhancement.activeEtaSeconds)}`
+    : undefined;
 
   return (
     <main className="player-page">
       <header className="player-header">
-        <a href="/" className="back-link">← 媒体库</a>
+        <a href="/" className="back-link"><span className="back-icon" aria-hidden="true" />媒体库</a>
         <div><h1>{item.title}</h1><p>{item.fileName}</p></div>
         <span className="transport-status"><i />{status}</span>
       </header>
@@ -374,20 +508,67 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
         {item.kind === 'audio' && <div className="audio-visual"><i /><i /><i /><i /><i /><i /><i /></div>}
         <video
           ref={videoRef}
-          controls
+          controls={item.kind === 'audio'}
           playsInline
-          preload="metadata"
+          preload="auto"
           poster={item.posterUrl}
           onLoadedMetadata={onLoadedMetadata}
-          onTimeUpdate={() => saveProgress(false)}
-          onPause={() => saveProgress(true)}
-          onEnded={() => saveProgress(true)}
+          onTimeUpdate={() => { saveProgress(false); if (scrubTargetRef.current === undefined) syncPlayback(); }}
+          onPlay={syncPlayback}
+          onPlaying={() => { syncPlayback(); if (superResolution !== 'off') setStatus(`电脑端${superResolutionLabel(superResolution)}超分 · 可拖动`); }}
+          onPause={() => { saveProgress(true); syncPlayback(); }}
+          onVolumeChange={syncPlayback}
+          onDurationChange={syncPlayback}
+          onSeeked={() => { scrubTargetRef.current = undefined; setScrubTarget(undefined); syncPlayback(); if (superResolution !== 'off') setStatus(`电脑端${superResolutionLabel(superResolution)}超分 · 可拖动`); }}
+          onEnded={() => { saveProgress(true); syncPlayback(); }}
           onError={onMediaError}
         >
           {item.subtitleTracks.map((track, index) => (
             <track key={track.index} kind="subtitles" src={`/api/media/${item.id}/subtitles/${track.index}.vtt`} srcLang={track.language || 'und'} label={track.title || track.language || `字幕 ${index + 1}`} default={index === 0} />
           ))}
         </video>
+        {item.kind === 'video' && (
+          <div className="localis-player-controls" role="group" aria-label="Localis 播放器控制">
+            {superResolution !== 'off' && (
+              <div className={`enhancement-progress ${serverEnhancement?.generationState === 'processing' ? 'processing' : ''}`}>
+                <div className="enhancement-progress-copy">
+                  <span><i />电脑端{superResolutionLabel(superResolution)}超分</span>
+                  <strong>
+                    {serverEnhancement?.generationState === 'complete'
+                      ? '缓存完成'
+                      : serverEnhancement?.generationState === 'processing'
+                        ? `生成 ${clock(serverEnhancement.activeSegmentStartSeconds ?? displayedTime)} · ${activeEnhancementPercent.toFixed(0)}%${enhancementSpeed ? ` · ${enhancementSpeed}` : ''}${enhancementEta ? ` · ${enhancementEta}` : ''}`
+                        : `已缓存 ${serverEnhancement?.generatedSegments ?? 0} 段 · ${enhancementPercentLabel}${enhancementSpeed ? ` · ${enhancementSpeed}` : ''}`}
+                  </strong>
+                </div>
+                <div className="enhancement-track" style={enhancementTrackStyle} role="progressbar" aria-label="电脑端超分生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(displayedEnhancementPercent)}><i /></div>
+                <small>{serverEnhancement?.strategy === 'on-demand' ? `整部影片可直接拖动；电脑会优先生成你跳到的位置。总缓存 ${enhancementPercentLabel}。` : '电脑正在准备完整兼容流。'}</small>
+              </div>
+            )}
+            <div className="playback-control-row">
+              <button className="playback-toggle" type="button" aria-label={playback.paused ? '播放' : '暂停'} onClick={togglePlayback}><span className={playback.paused ? 'play-icon' : 'pause-icon'} aria-hidden="true" /></button>
+              <span className="playback-time">{clock(displayedTime)}</span>
+              <input
+                className="playback-seek"
+                aria-label="播放进度"
+                type="range"
+                min="0"
+                max={Math.max(playbackDuration, 0.01)}
+                step="0.1"
+                value={Math.min(displayedTime, playbackDuration || 0)}
+                style={playbackTrackStyle}
+                onInput={(event) => previewSeek(Number(event.currentTarget.value))}
+                onChange={(event) => previewSeek(Number(event.currentTarget.value))}
+                onPointerUp={() => commitSeek()}
+                onKeyUp={() => commitSeek()}
+                onBlur={() => commitSeek()}
+              />
+              <span className="playback-time">{clock(playbackDuration)}</span>
+              <button className="player-text-button" type="button" aria-label={playback.muted ? '取消静音' : '静音'} onClick={toggleMute}>{playback.muted ? '开启声音' : '静音'}</button>
+              <button className="player-text-button" type="button" aria-label="全屏" onClick={() => void enterFullscreen()}>全屏</button>
+            </div>
+          </div>
+        )}
       </section>
 
       {error && <div className="inline-error player-inline-error" role="alert">{error}<button onClick={() => setError('')}>关闭</button></div>}

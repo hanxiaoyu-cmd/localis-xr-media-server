@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { LocalisConfig, MediaItem } from './types';
@@ -19,7 +19,7 @@ export type JobState = 'preparing' | 'running' | 'ready' | 'failed';
 export class SourceChangedError extends Error {}
 export class TranscodeCapacityError extends Error {}
 
-export const TRANSCODE_CACHE_SCHEMA = 'v5-server-sr-safe';
+export const TRANSCODE_CACHE_SCHEMA = 'v6-seekable-on-demand-sr';
 
 export interface TranscodeJob {
   key: string;
@@ -39,6 +39,16 @@ export interface TranscodeJob {
   startedAt: string;
   lastAccessAt: number;
   leaseExpiresAt?: number;
+  strategy?: 'eager' | 'on-demand';
+  durationSeconds?: number;
+  segmentDurationSeconds?: number;
+  totalSegments?: number;
+  completedSegmentIndexes?: Set<number>;
+  segmentInflight?: Map<number, Promise<string>>;
+  segmentProcesses?: Map<number, ChildProcessWithoutNullStreams>;
+  segmentProgressSeconds?: Map<number, number>;
+  processedMediaSeconds?: number;
+  processingWallSeconds?: number;
 }
 
 // Running EVENT playlists are refreshed continually by active HLS clients.
@@ -46,6 +56,7 @@ export interface TranscodeJob {
 // abandoned full-file transcode to be reclaimed when capacity is needed.
 export const TRANSCODE_ACTIVITY_LEASE_MS = 60_000;
 export const TRANSCODE_IDLE_SWEEP_INTERVAL_MS = 15_000;
+export const ON_DEMAND_SEGMENT_SECONDS = 4;
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -67,8 +78,32 @@ async function completePlaylist(directory: string, playlist: string) {
     const map = trimmed.match(/^#EXT-X-MAP:.*URI="([^"]+)"/);
     if (map) names.add(map[1]);
   }
-  if (![...names].every((name) => /^(init\.mp4|seg_\d{6}\.m4s)$/.test(name))) return false;
+  if (![...names].every((name) => /^(init\.mp4|seg_\d{6}\.(?:m4s|ts))$/.test(name))) return false;
   return (await Promise.all([...names].map((name) => exists(path.join(directory, name))))).every(Boolean);
+}
+
+function segmentDuration(job: TranscodeJob, index: number) {
+  const segmentSeconds = job.segmentDurationSeconds ?? ON_DEMAND_SEGMENT_SECONDS;
+  const duration = job.durationSeconds ?? 0;
+  return Math.max(0, Math.min(segmentSeconds, duration - index * segmentSeconds));
+}
+
+function onDemandPlaylist(durationSeconds: number, segmentSeconds = ON_DEMAND_SEGMENT_SECONDS) {
+  const totalSegments = Math.max(1, Math.ceil(durationSeconds / segmentSeconds));
+  const lines = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    `#EXT-X-TARGETDURATION:${Math.ceil(segmentSeconds)}`,
+    '#EXT-X-PLAYLIST-TYPE:VOD',
+    '#EXT-X-MEDIA-SEQUENCE:0',
+    '#EXT-X-INDEPENDENT-SEGMENTS',
+  ];
+  for (let index = 0; index < totalSegments; index += 1) {
+    const duration = Math.min(segmentSeconds, Math.max(0.001, durationSeconds - index * segmentSeconds));
+    lines.push(`#EXTINF:${duration.toFixed(6)},`, `seg_${String(index).padStart(6, '0')}.ts`);
+  }
+  lines.push('#EXT-X-ENDLIST', '');
+  return { playlist: lines.join('\n'), totalSegments };
 }
 
 async function directorySize(directory: string): Promise<number> {
@@ -89,6 +124,7 @@ export class TranscodeManager {
   private sweepPromise?: Promise<void>;
   private sweepTimer?: ReturnType<typeof setInterval>;
   private readonly cancellationPromises = new Map<string, Promise<void>>();
+  private activeOnDemandTasks = 0;
   encoder = 'libx264';
 
   constructor(private readonly config: LocalisConfig) {}
@@ -101,6 +137,13 @@ export class TranscodeManager {
 
   private hasActiveLease(job: TranscodeJob, now = Date.now()) {
     return (job.leaseExpiresAt ?? job.lastAccessAt + TRANSCODE_ACTIVITY_LEASE_MS) > now;
+  }
+
+  private activeWorkCount() {
+    const eagerJobs = [...this.jobs.values()].filter(
+      (job) => job.strategy !== 'on-demand' && (job.state === 'running' || job.state === 'preparing'),
+    ).length;
+    return eagerJobs + this.activeOnDemandTasks;
   }
 
   async initialize() {
@@ -218,6 +261,9 @@ export class TranscodeManager {
   private async prepare(item: MediaItem, mode: TranscodeMode, superResolution: ServerSuperResolutionLevel, key: string): Promise<TranscodeJob> {
     const directory = path.join(this.config.cacheDir, 'hls', key);
     const playlistPath = path.join(directory, 'index.m3u8');
+    if (item.kind === 'video' && superResolution !== 'off' && item.duration > 0) {
+      return this.prepareOnDemand(item, mode, superResolution, key, directory, playlistPath);
+    }
     await mkdir(directory, { recursive: true });
     if (await exists(playlistPath)) {
       const playlist = await readFile(playlistPath, 'utf8');
@@ -229,6 +275,7 @@ export class TranscodeManager {
           encoder: mode === 'transcode' ? this.encoder : 'copy',
           state: 'ready', progressSeconds: item.duration, startedAt: new Date().toISOString(),
           lastAccessAt: now, leaseExpiresAt: now + TRANSCODE_ACTIVITY_LEASE_MS,
+          strategy: 'eager', durationSeconds: item.duration,
         };
         this.jobs.set(key, cached);
         return cached;
@@ -244,8 +291,7 @@ export class TranscodeManager {
     // another headset whose playlist or segments are still being requested.
     await this.reclaimExpiredJobsForCapacity();
 
-    const activeCount = [...this.jobs.values()].filter((job) => job.state === 'running' || job.state === 'preparing').length;
-    if (activeCount >= this.config.maxTranscodes) throw new TranscodeCapacityError('当前已有转码任务，请稍后重试');
+    if (this.activeWorkCount() >= this.config.maxTranscodes) throw new TranscodeCapacityError('当前已有转码任务，请稍后重试');
 
     const now = Date.now();
     const job: TranscodeJob = {
@@ -254,9 +300,75 @@ export class TranscodeManager {
       encoder: mode === 'transcode' ? this.encoder : 'copy',
       state: 'preparing', progressSeconds: 0, startedAt: new Date().toISOString(),
       lastAccessAt: now, leaseExpiresAt: now + TRANSCODE_ACTIVITY_LEASE_MS,
+      strategy: 'eager', durationSeconds: item.duration,
     };
     this.jobs.set(key, job);
     this.launch(job, item);
+    return job;
+  }
+
+  private async prepareOnDemand(
+    item: MediaItem,
+    mode: TranscodeMode,
+    superResolution: ServerSuperResolutionLevel,
+    key: string,
+    directory: string,
+    playlistPath: string,
+  ) {
+    const manifest = onDemandPlaylist(item.duration);
+    await mkdir(directory, { recursive: true });
+    let cachedPlaylist = '';
+    try { cachedPlaylist = await readFile(playlistPath, 'utf8'); } catch { /* first request */ }
+    if (cachedPlaylist !== manifest.playlist) {
+      await rm(directory, { recursive: true, force: true });
+      await mkdir(directory, { recursive: true });
+      await writeFile(playlistPath, manifest.playlist, 'utf8');
+    }
+
+    const completedSegmentIndexes = new Set<number>();
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const match = entry.isFile() && entry.name.match(/^seg_(\d{6})\.ts$/);
+      if (!match) continue;
+      const index = Number(match[1]);
+      if (index < manifest.totalSegments && (await stat(path.join(directory, entry.name))).size > 0) {
+        completedSegmentIndexes.add(index);
+      }
+    }
+    const progressSeconds = [...completedSegmentIndexes].reduce(
+      (total, index) => total + Math.min(ON_DEMAND_SEGMENT_SECONDS, item.duration - index * ON_DEMAND_SEGMENT_SECONDS),
+      0,
+    );
+    const now = Date.now();
+    const job: TranscodeJob = {
+      key,
+      itemId: item.id,
+      directory,
+      playlistPath,
+      mode,
+      superResolution,
+      superResolutionPlan: serverSuperResolutionPlan(item, superResolution),
+      encoder: this.encoder,
+      // The complete VOD timeline is immediately available. Individual .ts
+      // segments are generated and cached only when Safari/HLS asks for them.
+      state: 'ready',
+      progressSeconds,
+      startedAt: new Date().toISOString(),
+      lastAccessAt: now,
+      leaseExpiresAt: now + TRANSCODE_ACTIVITY_LEASE_MS,
+      strategy: 'on-demand',
+      durationSeconds: item.duration,
+      segmentDurationSeconds: ON_DEMAND_SEGMENT_SECONDS,
+      totalSegments: manifest.totalSegments,
+      completedSegmentIndexes,
+      segmentInflight: new Map(),
+      segmentProcesses: new Map(),
+      segmentProgressSeconds: new Map(),
+      // Speed is measured only from work performed in this process. Cached
+      // segments from an earlier run must not inflate the reported rate.
+      processedMediaSeconds: 0,
+      processingWallSeconds: 0,
+    };
+    this.jobs.set(key, job);
     return job;
   }
 
@@ -313,6 +425,155 @@ export class TranscodeManager {
       '-hls_segment_filename', segment, '-hls_flags', 'independent_segments+temp_file', output,
     );
     return args;
+  }
+
+  private buildOnDemandSegmentArgs(job: TranscodeJob, item: MediaItem, index: number, encoder: string, outputPath: string) {
+    const start = index * (job.segmentDurationSeconds ?? ON_DEMAND_SEGMENT_SECONDS);
+    const duration = segmentDuration(job, index);
+    const args = [
+      '-hide_banner', '-nostdin', '-y', '-loglevel', 'warning', '-progress', 'pipe:1', '-stats_period', '0.25',
+      // Input-side seeking jumps to the closest keyframe first and then decodes
+      // accurately to the requested position. A long movie no longer needs to
+      // be processed from 00:00 before a far-away seek can start.
+      '-ss', start.toFixed(6), '-i', item.path, '-t', duration.toFixed(6),
+      '-output_ts_offset', start.toFixed(6),
+    ];
+    const pixelFormat = encoder === 'h264_mf' ? 'nv12' : 'yuv420p';
+    const pipeline = buildVideoPipeline(item, job.superResolution, pixelFormat);
+    if (pipeline.filterComplex && pipeline.outputLabel) {
+      args.push('-filter_complex', pipeline.filterComplex, '-map', pipeline.outputLabel, '-map', '0:a:0?');
+    } else {
+      args.push('-map', '0:v:0', '-map', '0:a:0?');
+      if (pipeline.filters) args.push('-vf', pipeline.filters.join(','));
+    }
+    const gop = Math.max(1, Math.round(pipeline.fps * 2));
+    args.push('-sn', '-dn', '-g', String(gop), '-keyint_min', String(gop), '-force_key_frames', 'expr:gte(t,n_forced*2)');
+    if (encoder !== 'h264_mf') args.push('-sc_threshold', '0');
+    args.push(
+      ...this.encoderArgs(encoder, job.superResolution),
+      '-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+      '-af', 'aresample=async=1:first_pts=0',
+      '-max_muxing_queue_size', '2048', '-muxdelay', '0', '-muxpreload', '0',
+      '-mpegts_flags', '+resend_headers', '-f', 'mpegts', outputPath,
+    );
+    return { args, start, duration };
+  }
+
+  private async acquireOnDemandSlot(job: TranscodeJob) {
+    await this.reclaimExpiredJobsForCapacity();
+    while (!job.cancelled && this.activeWorkCount() >= this.config.maxTranscodes) await wait(50);
+    if (job.cancelled) throw new Error('超分任务已停止');
+    this.activeOnDemandTasks += 1;
+  }
+
+  private releaseOnDemandSlot() {
+    this.activeOnDemandTasks = Math.max(0, this.activeOnDemandTasks - 1);
+  }
+
+  private runOnDemandSegment(job: TranscodeJob, item: MediaItem, index: number, encoder: string, outputPath: string) {
+    const { args, start, duration } = this.buildOnDemandSegmentArgs(job, item, index, encoder, outputPath);
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn(this.config.ffmpegPath, args, { windowsHide: true, shell: false, cwd: job.directory });
+      job.segmentProcesses?.set(index, child);
+      job.segmentProgressSeconds?.set(index, 0);
+      const wallStartedAt = Date.now();
+      let progressBuffer = '';
+      let stderr = '';
+      let settled = false;
+      child.stdout.on('data', (chunk: Buffer) => {
+        progressBuffer += chunk.toString();
+        const lines = progressBuffer.split(/\r?\n/);
+        progressBuffer = lines.pop() || '';
+        for (const line of lines) {
+          const [key, value] = line.split('=', 2);
+          if (key !== 'out_time_us') continue;
+          const mediaTime = Math.max(0, Number(value) / 1_000_000 - start);
+          job.segmentProgressSeconds?.set(index, Math.min(duration, mediaTime));
+        }
+      });
+      child.stderr.on('data', (chunk: Buffer) => { stderr = `${stderr}${chunk}`.slice(-16_384); });
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        job.segmentProcesses?.delete(index);
+        job.segmentProgressSeconds?.delete(index);
+        job.processingWallSeconds = (job.processingWallSeconds ?? 0) + (Date.now() - wallStartedAt) / 1_000;
+        if (error) reject(error);
+        else resolve();
+      };
+      child.once('error', (error) => finish(error));
+      child.once('close', (code) => {
+        if (code === 0) finish();
+        else finish(new Error(stderr.trim() || `FFmpeg exited with code ${code}`));
+      });
+    });
+  }
+
+  private async encodeOnDemandSegment(job: TranscodeJob, item: MediaItem, index: number, targetPath: string) {
+    const temporaryPath = `${targetPath}.part`;
+    await rm(temporaryPath, { force: true });
+    const initialEncoder = this.availableEncoders.indexOf(job.encoder);
+    const candidates = this.availableEncoders.slice(Math.max(0, initialEncoder));
+    let lastError: Error | undefined;
+    for (const encoder of candidates) {
+      try {
+        await this.runOnDemandSegment(job, item, index, encoder, temporaryPath);
+        const info = await stat(temporaryPath);
+        if (!info.isFile() || info.size <= 0) throw new Error('FFmpeg 没有生成有效的超分分片');
+        await rename(temporaryPath, targetPath);
+        job.encoder = encoder;
+        job.error = undefined;
+        return;
+      } catch (cause) {
+        lastError = cause instanceof Error ? cause : new Error(String(cause));
+        await rm(temporaryPath, { force: true }).catch(() => undefined);
+        // Switching encoders after earlier segments were cached could change
+        // the elementary stream parameters mid-playlist. Only fall back while
+        // this cache is still empty.
+        if ((job.completedSegmentIndexes?.size ?? 0) > 0) break;
+      }
+    }
+    throw lastError ?? new Error('超分分片生成失败');
+  }
+
+  async ensureOnDemandSegment(job: TranscodeJob, item: MediaItem, fileName: string) {
+    const match = fileName.match(/^seg_(\d{6})\.ts$/);
+    const index = match ? Number(match[1]) : Number.NaN;
+    if (job.strategy !== 'on-demand' || !Number.isInteger(index) || index < 0 || index >= (job.totalSegments ?? 0)) {
+      return undefined;
+    }
+    this.touchJob(job);
+    const targetPath = path.join(job.directory, fileName);
+    if (await exists(targetPath)) {
+      job.completedSegmentIndexes?.add(index);
+      return targetPath;
+    }
+    const existing = job.segmentInflight?.get(index);
+    if (existing) return existing;
+    const operation = (async () => {
+      await this.acquireOnDemandSlot(job);
+      try {
+        await this.encodeOnDemandSegment(job, item, index, targetPath);
+        job.completedSegmentIndexes?.add(index);
+        job.processedMediaSeconds = (job.processedMediaSeconds ?? 0) + segmentDuration(job, index);
+        const completedSeconds = [...(job.completedSegmentIndexes ?? [])]
+          .reduce((total, segmentIndex) => total + segmentDuration(job, segmentIndex), 0);
+        job.progressSeconds = Math.min(job.durationSeconds ?? completedSeconds, completedSeconds);
+        void this.pruneCache(job.directory);
+        return targetPath;
+      } catch (cause) {
+        job.error = cause instanceof Error ? cause.message : String(cause);
+        throw cause;
+      } finally {
+        this.releaseOnDemandSlot();
+      }
+    })();
+    job.segmentInflight?.set(index, operation);
+    try {
+      return await operation;
+    } finally {
+      if (job.segmentInflight?.get(index) === operation) job.segmentInflight.delete(index);
+    }
   }
 
   private launch(job: TranscodeJob, item: MediaItem) {
@@ -398,6 +659,7 @@ export class TranscodeManager {
 
   private async performCancelJob(job: TranscodeJob) {
     job.cancelled = true;
+    for (const segmentProcess of job.segmentProcesses?.values() ?? []) segmentProcess.kill();
     const child = job.process;
     if (child) {
       await new Promise<void>((resolve) => {
@@ -440,7 +702,7 @@ export class TranscodeManager {
   }
 
   private async reclaimExpiredJobsForCapacity() {
-    let activeCount = [...this.jobs.values()].filter((job) => job.state === 'running' || job.state === 'preparing').length;
+    let activeCount = this.activeWorkCount();
     if (activeCount < this.config.maxTranscodes) return;
     const now = Date.now();
     const expired = [...this.jobs.values()]
@@ -449,7 +711,7 @@ export class TranscodeManager {
     for (const job of expired) {
       if (this.jobs.get(job.key) !== job || this.hasActiveLease(job)) continue;
       await this.cancelJob(job);
-      activeCount = [...this.jobs.values()].filter((candidate) => candidate.state === 'running' || candidate.state === 'preparing').length;
+      activeCount = this.activeWorkCount();
       if (activeCount < this.config.maxTranscodes) return;
     }
   }
@@ -465,7 +727,7 @@ export class TranscodeManager {
   }
 
   resolveAsset(job: TranscodeJob, fileName: string) {
-    if (!/^(index\.m3u8|init\.mp4|seg_\d{6}\.m4s)$/.test(fileName)) return undefined;
+    if (!/^(index\.m3u8|init\.mp4|seg_\d{6}\.(?:m4s|ts))$/.test(fileName)) return undefined;
     this.touchJob(job);
     return path.join(job.directory, fileName);
   }
@@ -501,13 +763,77 @@ export class TranscodeManager {
     const key = this.jobKey(item, mode, superResolution);
     const job = this.jobs.get(key);
     const plan = job?.superResolutionPlan ?? serverSuperResolutionPlan(item, superResolution);
+    if (job?.strategy === 'on-demand') {
+      const completedSeconds = [...(job.completedSegmentIndexes ?? [])]
+        .reduce((total, index) => total + segmentDuration(job, index), 0);
+      const activeSeconds = [...(job.segmentProgressSeconds?.entries() ?? [])]
+        .filter(([index]) => !job.completedSegmentIndexes?.has(index))
+        .reduce((total, [, seconds]) => total + seconds, 0);
+      const activeEntries = [...(job.segmentProgressSeconds?.entries() ?? [])]
+        .filter(([index]) => !job.completedSegmentIndexes?.has(index));
+      const activeDurationSeconds = activeEntries.reduce((total, [index]) => total + segmentDuration(job, index), 0);
+      const generatedSeconds = Math.min(item.duration, completedSeconds + activeSeconds);
+      const processingWallSeconds = job.processingWallSeconds ?? 0;
+      const speed = processingWallSeconds > 0 ? (job.processedMediaSeconds ?? completedSeconds) / processingWallSeconds : 0;
+      const remainingSeconds = Math.max(0, item.duration - completedSeconds);
+      return {
+        state: job.state,
+        mode: job.mode,
+        encoder: job.encoder,
+        progressSeconds: generatedSeconds,
+        durationSeconds: item.duration,
+        progressPercent: item.duration > 0 ? Math.min(100, generatedSeconds / item.duration * 100) : 0,
+        speed,
+        etaSeconds: speed > 0 ? remainingSeconds / speed : undefined,
+        activeSegmentPercent: activeDurationSeconds > 0 ? Math.min(100, activeSeconds / activeDurationSeconds * 100) : undefined,
+        activeSegmentStartSeconds: activeEntries.length > 0
+          ? Math.min(...activeEntries.map(([index]) => index * (job.segmentDurationSeconds ?? ON_DEMAND_SEGMENT_SECONDS)))
+          : undefined,
+        activeEtaSeconds: speed > 0 && activeDurationSeconds > 0
+          ? Math.max(0, activeDurationSeconds - activeSeconds) / speed
+          : undefined,
+        generatedSegments: job.completedSegmentIndexes?.size ?? 0,
+        totalSegments: job.totalSegments ?? 0,
+        generationState: remainingSeconds <= 0
+          ? 'complete'
+          : (job.segmentProcesses?.size ?? 0) > 0 ? 'processing' : 'waiting',
+        strategy: 'on-demand',
+        seekable: true,
+        error: job.error,
+        superResolution,
+        plan,
+      };
+    }
     return job
-      ? { state: job.state, mode: job.mode, encoder: job.encoder, progressSeconds: job.progressSeconds, error: job.error, superResolution, plan }
+      ? {
+          state: job.state,
+          mode: job.mode,
+          encoder: job.encoder,
+          progressSeconds: job.progressSeconds,
+          durationSeconds: item.duration,
+          progressPercent: item.duration > 0 ? Math.min(100, job.progressSeconds / item.duration * 100) : 0,
+          speed: Math.max(0, job.progressSeconds / Math.max(0.001, (Date.now() - Date.parse(job.startedAt)) / 1_000)),
+          etaSeconds: job.progressSeconds > 0
+            ? Math.max(0, item.duration - job.progressSeconds) / (job.progressSeconds / Math.max(0.001, (Date.now() - Date.parse(job.startedAt)) / 1_000))
+            : undefined,
+          generationState: job.state === 'ready' ? 'complete' : job.state === 'failed' ? 'failed' : 'processing',
+          strategy: 'eager',
+          seekable: job.state === 'ready',
+          error: job.error,
+          superResolution,
+          plan,
+        }
       : {
           state: superResolution !== 'off' && !plan.available ? 'unavailable' : 'idle',
           mode,
           encoder: mode === 'transcode' ? this.encoder : 'copy',
           progressSeconds: 0,
+          durationSeconds: item.duration,
+          progressPercent: 0,
+          speed: 0,
+          generationState: 'waiting',
+          strategy: superResolution !== 'off' && item.duration > 0 ? 'on-demand' : 'eager',
+          seekable: superResolution !== 'off' && item.duration > 0,
           error: plan.reason,
           superResolution,
           plan,
@@ -528,6 +854,7 @@ export class TranscodeManager {
     for (const job of this.jobs.values()) {
       job.cancelled = true;
       job.process?.kill();
+      for (const process of job.segmentProcesses?.values() ?? []) process.kill();
     }
   }
 }

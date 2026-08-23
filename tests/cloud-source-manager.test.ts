@@ -381,8 +381,10 @@ describe('CloudSourceManager', () => {
         }
         expect(transcode).toMatchObject({ state: 'ready', superResolution: 'standard' });
         expect(transcodes.jobForItem(item, 'standard')).toBe(transcode);
+        const firstSegment = await transcodes.ensureOnDemandSegment(transcode, localized, 'seg_000000.ts');
+        expect(firstSegment).toBeTruthy();
         const probe = await execFileAsync('ffprobe', [
-          '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,codec_name', '-of', 'json', transcode.playlistPath,
+          '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,codec_name', '-of', 'json', firstSegment!,
         ], { windowsHide: true });
         expect((JSON.parse(probe.stdout) as { streams: Array<{ width: number; height: number; codec_name: string }> }).streams[0])
           .toMatchObject({ width: 1600, height: 900, codec_name: 'h264' });
