@@ -8,4 +8,6 @@ Localis 调用用户电脑上已有的 FFmpeg/ffprobe，不在本仓库中分发
 
 Localis 只实现标准 WebDAV 客户端兼容层，不复制、链接或捆绑 OpenList。OpenList 是独立的 AGPL-3.0 项目，由选择该实验性云盘桥接方式的用户自行安装和维护；若未来捆绑、修改或分发 OpenList，发布者必须另行履行 AGPL-3.0 义务。夸克 OpenList 驱动使用非官方接口，不属于 Localis 或夸克的官方集成。
 
+Localis 不捆绑或调用夸克官方网盘 Skill 的动态下载运行时。其公开仓库采用 Apache-2.0，但当前能力是面向 Agent 的浏览器授权、搜索与完整文件下载，不是 Localis 可依赖的 Windows Range 流媒体 SDK。Localis 也不启用 OpenList QuarkTV 当前通过第三方明文 HTTP 服务交换登录票据的扫码链路。
+
 项目本身目前没有开源许可证。没有明确许可证并不等于允许复制、修改或再发布；在许可证决定完成前，GitHub 仓库应保持私有。

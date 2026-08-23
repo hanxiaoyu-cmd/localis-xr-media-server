@@ -119,6 +119,26 @@ afterEach(async () => {
 });
 
 describe('CloudSourceManager', () => {
+  it('reports QR connector readiness without exposing credentials and rejects an unconfigured Baidu build', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'localis-cloud-connectors-'));
+    temporaryDirectories.push(root);
+    const manager = new CloudSourceManager(configFor(root));
+    await manager.initialize();
+    try {
+      const capabilities = manager.connectorCapabilities();
+      expect(capabilities).toMatchObject({
+        baidu: { available: false, login: 'qr', appFolder: 'Localis' },
+        quark: { available: false, login: 'official-api-required', advancedWebDavAvailable: true },
+      });
+      expect(JSON.stringify(capabilities)).not.toMatch(/"(?:secretKey|appKey|accessToken|refreshToken|cookie)"/i);
+      await expect(manager.startBaiduAuthorization()).rejects.toMatchObject({
+        code: 'baidu_connector_unconfigured', status: 503,
+      });
+    } finally {
+      manager.shutdown();
+    }
+  });
+
   it('scans a loopback OpenList WebDAV tree, proxies Range and caches encrypted credentials', async () => {
     const expectedAuthorization = `Basic ${Buffer.from('localis-reader:read-only-secret').toString('base64')}`;
     let upstreamGets = 0;
@@ -246,6 +266,17 @@ describe('CloudSourceManager', () => {
         config: configFor(root), library, auth, progress,
         transcodes: new TranscodeManager(configFor(root)), clouds: manager,
       });
+      const connectors = await request(api).get('/api/cloud/connectors').set('Host', 'localhost').expect(200);
+      expect(connectors.body).toMatchObject({
+        baidu: { available: false, login: 'qr' },
+        quark: { available: false, login: 'official-api-required' },
+      });
+      expect(JSON.stringify(connectors.body)).not.toContain('read-only-secret');
+      const injectedCredentials = await request(api).post('/api/cloud/baidu/device')
+        .set('Host', 'localhost').set('Origin', 'http://localhost')
+        .send({ appKey: 'browser-supplied-key', secretKey: 'browser-supplied-secret', appFolder: 'Unsafe' })
+        .expect(503);
+      expect(injectedCredentials.body).toMatchObject({ error: 'baidu_connector_unconfigured' });
       const getsBeforeHead = upstreamGets;
       const head = await request(api).head(`/api/media/${publicVideo.id}/stream`).set('Host', 'localhost').expect(200);
       expect(head.headers['content-length']).toBe(String(quarkVideo.length));
@@ -402,12 +433,13 @@ describe('CloudSourceManager', () => {
 
   it('completes Baidu device authorization, lists the app directory and proxies redirected Range downloads', async () => {
     const largeFsId = '1844674407370955161';
-    const observed = { listUserAgent: '', listStarts: [] as string[], fileMetasFsIds: '', downloadUserAgent: '', downloadRange: '', downloadToken: '' };
+    const observed = { deviceRequests: 0, listUserAgent: '', listStarts: [] as string[], fileMetasFsIds: '', downloadUserAgent: '', downloadRange: '', downloadToken: '' };
     let origin = '';
     const server = createServer((request, response) => {
       const url = new URL(request.url!, origin);
       response.setHeader('Content-Type', 'application/json');
       if (url.pathname === '/oauth/2.0/device/code') {
+        observed.deviceRequests += 1;
         expect(url.searchParams.get('client_id')).toBe('test-app-key');
         expect(url.searchParams.get('scope')).toBe('basic,netdisk');
         response.end(JSON.stringify({
@@ -466,17 +498,28 @@ describe('CloudSourceManager', () => {
 
     const root = await mkdtemp(path.join(os.tmpdir(), 'localis-cloud-baidu-'));
     temporaryDirectories.push(root);
-    const manager = new CloudSourceManager(configFor(root), { baiduOAuth: origin, baiduPan: origin }, { baiduPageDelayMs: 0 });
+    const config = {
+      ...configFor(root),
+      baiduAppKey: 'test-app-key',
+      baiduSecretKey: 'test-secret-key',
+      baiduAppFolder: 'Localis',
+    };
+    const manager = new CloudSourceManager(config, { baiduOAuth: origin, baiduPan: origin }, { baiduPageDelayMs: 0 });
     await manager.initialize();
     try {
-      const started = await manager.startBaiduAuthorization({
-        name: '百度官方测试盘', appFolder: 'Localis', appKey: 'test-app-key', secretKey: 'test-secret-key',
-      });
+      expect(manager.connectorCapabilities()).toMatchObject({ baidu: { available: true, appFolder: 'Localis' } });
+      expect(JSON.stringify(manager.connectorCapabilities())).not.toContain('test-secret-key');
+      const started = await manager.startBaiduAuthorization({ name: '百度官方测试盘' });
       expect(started).toMatchObject({ userCode: 'ABCD-EFGH', intervalSeconds: 5 });
       expect(started.qrCodeDataUrl).toMatch(/^data:image\/png;base64,/);
+      const resumed = await manager.startBaiduAuthorization({ name: '不会创建第二个会话' });
+      expect(resumed.sessionId).toBe(started.sessionId);
+      expect(observed.deviceRequests).toBe(1);
+      expect(manager.connectorCapabilities().baidu.activeAuthorization?.sessionId).toBe(started.sessionId);
 
       const authorized = await manager.pollBaiduAuthorization(started.sessionId);
       expect(authorized).toMatchObject({ state: 'authorized', source: { connection: '百度官方 API', rootPath: '/apps/Localis', fileCount: 2 } });
+      expect(manager.connectorCapabilities().baidu.activeAuthorization).toBeUndefined();
       expect(observed.listUserAgent).toBe('pan.baidu.com');
       expect(observed.listStarts).toEqual(['0', '1000']);
       const video = manager.files().find((file) => file.fileName === '百度测试.mp4')!;

@@ -224,6 +224,10 @@ export function createApiApp(deps: AppDependencies) {
     if (!requireLocalCloudManagement(req, res)) return;
     res.json({ sources: clouds!.summaries() });
   });
+  app.get('/api/cloud/connectors', (req, res) => {
+    if (!requireLocalCloudManagement(req, res)) return;
+    res.json(clouds!.connectorCapabilities());
+  });
   app.post('/api/cloud/webdav', async (req, res, next) => {
     try {
       if (!requireLocalCloudManagement(req, res)) return;
@@ -244,9 +248,6 @@ export function createApiApp(deps: AppDependencies) {
       if (!requireLocalCloudManagement(req, res)) return;
       res.status(201).json(await clouds!.startBaiduAuthorization({
         name: String(req.body?.name || ''),
-        appFolder: String(req.body?.appFolder || ''),
-        appKey: String(req.body?.appKey || ''),
-        secretKey: String(req.body?.secretKey || ''),
       }));
     } catch (error) { next(error); }
   });

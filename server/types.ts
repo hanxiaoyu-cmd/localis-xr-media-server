@@ -77,6 +77,13 @@ export interface LocalisConfig {
   maxCacheBytes?: number;
   cloudCacheBytes?: number;
   maxCloudDownloads?: number;
+  /**
+   * Publisher-managed Baidu application identity. These values are read by the
+   * computer-side server only and are never returned to the browser.
+   */
+  baiduAppKey?: string;
+  baiduSecretKey?: string;
+  baiduAppFolder?: string;
 }
 
 export interface PlaybackProgress {

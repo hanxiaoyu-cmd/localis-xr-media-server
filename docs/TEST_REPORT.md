@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | ESLint | 通过 | 全项目无 lint 错误或警告 |
 | TypeScript | 通过 | `tsc --noEmit` |
-| 单元/集成 | 10 个文件、49 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、电脑端超分、真实转码、云盘协议与安全边界 |
+| 单元/集成 | 11 个文件、51 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、电脑端超分、真实转码、二维码登录界面、云盘协议与安全边界 |
 | 生产构建 | 通过 | Vinext 五阶段 client/RSC/SSR 构建 |
 | 编码器探测 | 通过 | NVENC、Media Foundation、libx264 运行时真实编码探测；本机自动选择 NVENC |
 | NVENC 路径 | 通过 | 完整集成套件真实生成 H.264/yuv420p + AAC fMP4 HLS |
@@ -33,6 +33,7 @@
 | OpenList/WebDAV | 通过 | 真实本机 mock HTTP 服务：Depth 1 的 207 XML、嵌套目录、自身目录去重、越界 href 过滤、Basic Auth、Range、完整缓存 |
 | WebDAV 安全边界 | 通过 | 拒绝远程地址与 URL 内嵌凭据；存储 JSON 中无明文密码；重启后可用密钥解密并重新扫描 |
 | 百度设备码 OAuth | 通过（协议模拟） | device code、二维码、token、`/apps/Localis` 递归列表、filemetas dlink、302、必需 UA 与 Range |
+| 云盘二维码界面 | 通过 | 百度默认 0 个凭据输入框；发布者未配置时按钮安全禁用；配置后会话幂等复用；夸克不安全直连禁用且高级 WebDAV 默认折叠 |
 | 百度凭据保护 | 通过 | 持久化文件中不包含 SecretKey、Access Token 或 Refresh Token 明文 |
 | 云盘媒体脱敏 | 通过 | 公共媒体 JSON 不含 `remoteFileId`、OpenList 地址或本机上游端口 |
 | 云盘缓存 | 通过 | 默认串行下载、50 GB 可配置硬配额、磁盘余量保护、`507`、原子重命名、崩溃 `.part` 清理及持久缓存清单 |
@@ -79,6 +80,8 @@ standard SR: 1280x720 -> 1600x900
 - 恶意 WebDAV 响应中的 `/dav/Other/escape.mp4` 不会进入媒体库。
 - 百度流程执行实际 HTTP device code/token/listall/filemetas/302/download；验证两页 `start` 游标、超过 JavaScript 安全整数的 `fs_id` 不丢精度，并断言下载端收到 `User-Agent: pan.baidu.com`、原始 Range 和 Access Token。
 - 二维码由真实 `qrcode` 依赖生成 PNG data URL。
+- `/api/cloud/connectors` 不返回 AppKey、SecretKey、Token 或 WebDAV 密码；浏览器试图在请求体注入百度凭据会被忽略。
+- 生产 Chromium 实际打开云盘弹窗：百度页可见输入框为 0，夸克高级入口展开前四项输入均不可见；回到播放器后 HLS 视频 `readyState=4`、无媒体错误、控制台为空。
 
 这些测试证明 Localis 的协议实现和安全边界，不证明第三方服务账户当前可用，也不替代真实账号授权。
 
@@ -91,6 +94,7 @@ standard SR: 1280x720 -> 1600x900
 5. 非法超分档位原本会静默降级为 `off`；路由现在返回明确的 `400 invalid_super_resolution_level`。
 6. Windows 上 FFmpeg `exit` 可能早于最终播放列表原子落盘；任务继续等待 stdio 完全关闭的 `close` 事件。
 7. Chromium 的 `canPlayType` 在此环境声称可原生播放 HLS，但实际点击后曾出现 `DEMUXER_ERROR_COULD_NOT_PARSE`。现在只有 Apple Safari（含 Vision Pro）优先原生 HLS；Quest/PICO 与桌面 Chromium 优先 hls.js，生产页面复验为 blob MediaSource、无媒体错误且时间实际推进。
+8. 原云盘窗口要求普通用户填写百度应用密钥或四项 OpenList 配置。现在百度改为发布者电脑端一次配置、用户只扫码；二维码会话可恢复。夸克现有自动扫码方案存在第三方明文票据交换，因此默认禁用，不把高风险链路伪装成便捷功能。
 
 ## 尚未声称通过
 

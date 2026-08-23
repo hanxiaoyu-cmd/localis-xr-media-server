@@ -47,6 +47,7 @@
 
 ## 真实夸克/OpenList
 
+- [ ] 不使用 OpenList QuarkTV 当前的第三方明文 HTTP 换票链路；真实账号测试仅限已自行完成风险评估的其他只读存储方式。
 - [ ] OpenList 仅监听 `127.0.0.1:5244`；另一台 LAN 设备直连 5244 应失败。
 - [ ] `localis-reader` 只有 WebDAV Read 与目标夸克目录权限。
 - [ ] Localis 成功列出真实夸克视频、音频和中文嵌套目录。
@@ -57,7 +58,7 @@
 
 ## 真实百度官方 API
 
-- [ ] 使用测试专用“软件”应用与测试账号，不把 SecretKey 提交到 Git。
+- [ ] 在电脑端用环境变量配置测试专用“软件”应用与测试账号；百度弹窗中没有 AppKey/SecretKey 输入框，且 SecretKey 不提交到 Git。
 - [ ] Localis 显示官方设备码二维码，百度网盘 App 扫码后成功连接。
 - [ ] 只列出 `/我的应用数据/应用名` 中的媒体；其他目录不会意外出现。
 - [ ] 10%/50%/90% seek 返回正确 Range；浏览器看不到 dlink 或 Access Token。

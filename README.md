@@ -23,7 +23,7 @@ Localis 是运行在电脑上的私有局域网媒体站。Vision Pro、Quest �
 - VR180、VR360、平面，Mono/SBS/TB、LR/RL，并可手动覆盖识别结果。
 - WebXR 内空间播放/暂停、前后 10 秒、退出和字幕面板。
 - 电脑端可用原生文件夹选择窗口添加媒体；完整路径输入仍作为降级入口。
-- 夸克 OpenList/WebDAV 只读桥接，以及百度网盘官方设备码 OAuth 接入。
+- 二维码优先的云盘登录界面：百度由电脑端配置官方应用身份后，普通用户只需扫码；夸克不安全的非官方直连默认禁用，已有 OpenList 仅保留为折叠的高级兼容入口。
 - 云盘凭据不发送给头显；电脑代理 Range，超分前先缓存源文件，再沿用同一条 FFmpeg 管线。
 - 六位配对码、HMAC 签名 HttpOnly Cookie、尝试限速、Host/Origin 检查、路径隐藏和 HLS 文件名白名单。
 - 公网可信证书 + 私有 LAN DNS 的零安装 HTTPS 方案；证书私钥只保存在电脑上。
@@ -100,28 +100,42 @@ npm run start:local
 
 ### 夸克网盘
 
-夸克目前没有面向普通第三方 Node 应用的公开媒体 HTTP API。Localis 不抓取 Cookie、不调用夸克私有接口，而是提供明确标为实验性的 OpenList/WebDAV 只读桥接：
+Localis 的界面已经预留“扫码登录夸克网盘”，但截至 2026-08-23 暂不启用。夸克目前没有向 Localis 提供可公开集成的扫码/device OAuth、目录枚举和 HTTP Range 播放契约。Localis 不抓取 Cookie、不复制私有签名算法，也不会把不安全的第三方换票链路包装成“官方直连”。
+
+夸克发布了[官方网盘 Skill](https://github.com/quark-clouddrive/quarkclouddrive_offical)，但它目前使用电脑浏览器 OAuth，只提供搜索和完整下载到本机，Windows 原生也不受支持；它不是可供 Localis 嵌入的二维码流媒体 SDK。OpenList 的 QuarkTV 虽能显示二维码，但其当前源码会通过第三方明文 HTTP 服务交换登录票据，因此 Localis 不自动安装、不启动，也绝不使用真实账号测试该链路。
+
+已经自行评估并部署 OpenList 的高级用户仍可展开“高级兼容：我已有本机 OpenList”，使用标准 WebDAV 只读桥接：
 
 1. 用户自行安装和维护 [OpenList](https://github.com/OpenListTeam/OpenList)，在其中挂载夸克。
 2. OpenList 只监听 `127.0.0.1:5244`，不要直接暴露给局域网。
 3. 创建 `localis-reader` 用户，只授予目标目录和 `WebDAV Read` 权限。
 4. 将 OpenList 存储的“WebDAV 策略”设为“本机代理（Native Proxy）”。
-5. 在 Localis 中填写 `http://127.0.0.1:5244/dav/`、挂载路径（通常 `/Quark`）和只读账户。
+5. 在折叠的高级入口中填写 `http://127.0.0.1:5244/dav/`、挂载路径（通常 `/Quark`）和只读账户。
 
 Localis 会拒绝非 loopback 地址和 URL 内嵌账号密码，也绝不跟随 WebDAV 文件 GET 返回的 `302`。因此目录可能可以扫描，但若单个文件仍由 OpenList 重定向到上游地址，Localis 会在播放前明确报错；请检查“WebDAV 策略”是否为“本机代理”。有关夸克驱动的非官方性质与限制，参见 [OpenList 夸克驱动说明](https://doc.oplist.org/guide/drivers/quark.html) 和 [WebDAV 文档](https://doc.oplist.org/guide/advanced/webdav)。
 
 ### 百度网盘
 
-推荐使用百度官方 API：
+默认界面不再要求普通用户填写应用目录、AppKey、SecretKey、WebDAV 地址或密码。发布者在运行 Localis 的电脑端一次性配置经过百度审核的应用身份后，使用流程就是：
 
-1. 在[百度网盘开放平台](https://pan.baidu.com/union)创建“软件”应用，取得 AppKey 与 SecretKey。
-2. 在 Localis 的百度页填写应用目录名称、AppKey 和 SecretKey。
-3. 获取二维码，并使用百度网盘 App 扫码授权；本地程序使用设备码模式，无需公网 OAuth 回调。
-4. 授权后 Localis 扫描 `/apps/应用目录名`。新应用通常只能访问用户界面中的“我的应用数据/应用名”，请把视频复制或移动到该目录。
+1. 在电脑端点击“连接云盘 → 百度网盘”。
+2. 点击“显示登录二维码”，使用百度网盘 App 扫码授权。
+3. 授权完成后 Localis 自动扫描 `/apps/应用目录名`，媒体随即出现在资料库。
 
-Access Token、Refresh Token 与 SecretKey 会以 AES-256-GCM 密文保存到仓库外的数据目录；加密密钥同样只保存在该操作系统用户的数据目录并限制文件权限。浏览器、日志、媒体 URL 与 FFmpeg 命令行都不会收到 Token 或百度 dlink。也可在“高级兼容方式”中连接用户自行部署的百度 OpenList WebDAV。
+电脑端发布者配置（普通用户看不到这些值）：
 
-没有用户自己的百度开发者凭据与扫码授权时，自动化只能验证完整协议模拟，不能诚实声称真实百度账号已通过。百度现行权限和下载规则以其[权限与配额](https://pan.baidu.com/union/doc/使用入门/权限与配额/)及[设备码授权文档](https://pan.baidu.com/union/doc/使用入门/接入授权/设备码模式授权/)为准。
+```powershell
+$env:LOCALIS_BAIDU_APP_KEY = '已审核应用的 AppKey'
+$env:LOCALIS_BAIDU_SECRET_KEY = '已审核应用的 SecretKey'
+$env:LOCALIS_BAIDU_APP_FOLDER = 'Localis'
+npm run start:local
+```
+
+百度的设备码换取 Token 与后续刷新都要求 SecretKey，因此没有应用身份时 Localis 会明确禁用二维码按钮，而不会诱导用户在浏览器里发送秘密。面向公众发布时，共享 SecretKey 不能安全地编译进桌面程序；正式产品需要发布者维护只负责换票/刷新的 HTTPS OAuth Broker，并完成百度的公开应用审核。媒体列表、下载、Range、缓存、FFmpeg 转码和超分仍全部在用户电脑完成，不经过 Broker。详见[设备码授权文档](https://pan.baidu.com/union/doc/使用入门/接入授权/设备码模式授权/)、[创建应用](https://pan.baidu.com/union/doc/使用入门/创建应用/)与[权限和配额](https://pan.baidu.com/union/doc/使用入门/权限与配额/)。
+
+Access Token、Refresh Token 与用于刷新它们的 SecretKey 会以 AES-256-GCM 密文保存到仓库外的数据目录；加密密钥同样只保存在该操作系统用户的数据目录并限制文件权限。浏览器、日志、媒体 URL 与 FFmpeg 命令行都不会收到这些值或百度 dlink。
+
+仓库自动化会验证“无配置时安全禁用、服务器凭据永不出现在网页、二维码会话幂等恢复、设备码换票、分页、Range 与密文持久化”的完整协议模拟。没有发布者的已审核应用和真实账号授权时，不能诚实声称真实百度账号已通过端到端验收。
 
 ### 云盘播放行为
 
@@ -200,7 +214,7 @@ npm test
 npm run build
 ```
 
-当前自动化为 10 个文件、49 项测试，覆盖扫描与路径隐藏、配对、Range、字幕、原生选择器协议、Safari/Chromium HLS 分流、四档电脑端超分规划、SBS/TB 眼间隔离、H.264 Level 5.2 安全范围、真实 FFmpeg HLS、任务租约与回收、硬配额缓存、OpenList WebDAV，以及百度官方 OAuth/分页/Range 协议模拟。生产构建还在真实 Chromium 中验证了 hls.js 连续播放、1600×900 标准档、1920×1080 高档、设备端超分画布为 0、局域网只读管理边界与控制台无错误。
+当前自动化为 11 个文件、51 项测试，覆盖扫描与路径隐藏、配对、Range、字幕、原生选择器协议、Safari/Chromium HLS 分流、四档电脑端超分规划、SBS/TB 眼间隔离、H.264 Level 5.2 安全范围、真实 FFmpeg HLS、任务租约与回收、硬配额缓存、OpenList WebDAV、二维码优先界面，以及百度官方 OAuth/分页/Range 协议模拟。生产构建还在真实 Chromium 中验证了 hls.js 连续播放、1600×900 标准档、1920×1080 高档、设备端超分画布为 0、百度默认 0 个凭据输入框、夸克高级入口默认折叠、局域网只读管理边界与控制台无错误。
 
 详细记录见 [测试报告](./docs/TEST_REPORT.md)，真机步骤见 [头显验收清单](./docs/HEADSET_ACCEPTANCE.md)。真实 Vision Pro/Quest/PICO、真实夸克账户与真实百度账号仍需由拥有这些设备和凭据的用户完成清单，项目不会把模拟结果冒充真机结果。
 

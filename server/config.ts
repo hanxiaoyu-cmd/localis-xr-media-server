@@ -95,6 +95,9 @@ export async function loadConfig(): Promise<LocalisConfig> {
     maxCacheBytes: Math.max(1, Number(process.env.LOCALIS_CACHE_GB || 20)) * 1024 ** 3,
     cloudCacheBytes: Math.max(1, Number(process.env.LOCALIS_CLOUD_CACHE_GB || 50)) * 1024 ** 3,
     maxCloudDownloads: Math.min(2, Math.max(1, Number(process.env.LOCALIS_MAX_CLOUD_DOWNLOADS || 1))),
+    baiduAppKey: process.env.LOCALIS_BAIDU_APP_KEY?.trim() || undefined,
+    baiduSecretKey: process.env.LOCALIS_BAIDU_SECRET_KEY?.trim() || undefined,
+    baiduAppFolder: process.env.LOCALIS_BAIDU_APP_FOLDER?.trim() || 'Localis',
   };
 }
 

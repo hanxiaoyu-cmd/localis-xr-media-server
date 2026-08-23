@@ -44,6 +44,22 @@ interface BaiduAuthorization {
   intervalSeconds: number;
 }
 
+interface CloudConnectorCapabilities {
+  baidu: {
+    available: boolean;
+    login: 'qr';
+    appFolder: string;
+    activeAuthorization?: BaiduAuthorization;
+    unavailableReason?: string;
+  };
+  quark: {
+    available: false;
+    login: 'official-api-required';
+    advancedWebDavAvailable: true;
+    unavailableReason: string;
+  };
+}
+
 const posterTones = ['violet', 'ocean', 'ember', 'mint', 'gold', 'rose'];
 const pairingMessages: Record<string, string> = {
   invalid_pairing_code: '配对码不正确，请查看电脑端本次启动显示的六位数字。',
@@ -96,13 +112,12 @@ export function MediaLibraryView() {
   const [folderBusy, setFolderBusy] = useState(false);
   const [folderError, setFolderError] = useState('');
   const [cloudOpen, setCloudOpen] = useState(false);
-  const [cloudProvider, setCloudProvider] = useState<'quark' | 'baidu'>('quark');
-  const [baiduConnection, setBaiduConnection] = useState<'official' | 'webdav'>('official');
+  const [cloudProvider, setCloudProvider] = useState<'quark' | 'baidu'>('baidu');
   const [cloudSources, setCloudSources] = useState<CloudSourceSummary[]>([]);
+  const [cloudConnectors, setCloudConnectors] = useState<CloudConnectorCapabilities>();
   const [cloudBusy, setCloudBusy] = useState(false);
   const [cloudError, setCloudError] = useState('');
   const [webDav, setWebDav] = useState({ baseUrl: 'http://127.0.0.1:5244/dav/', rootPath: '/Quark', username: 'localis-reader', password: '' });
-  const [baiduApp, setBaiduApp] = useState({ appKey: '', secretKey: '', appFolder: 'Localis' });
   const [baiduAuthorization, setBaiduAuthorization] = useState<BaiduAuthorization>();
 
   const loadLibrary = async () => {
@@ -224,10 +239,20 @@ export function MediaLibraryView() {
     }
   };
 
+  const loadCloudConnectors = async () => {
+    try {
+      const result = await jsonFetch<CloudConnectorCapabilities>('/api/cloud/connectors');
+      setCloudConnectors(result);
+      if (result.baidu.activeAuthorization) setBaiduAuthorization(result.baidu.activeAuthorization);
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : '无法读取云盘登录能力');
+    }
+  };
+
   const openCloudManager = () => {
     setCloudError('');
     setCloudOpen(true);
-    void loadCloudSources();
+    void Promise.all([loadCloudSources(), loadCloudConnectors()]);
   };
 
   const connectWebDav = async (event: FormEvent) => {
@@ -259,10 +284,9 @@ export function MediaLibraryView() {
     try {
       const authorization = await jsonFetch<BaiduAuthorization>('/api/cloud/baidu/device', {
         method: 'POST',
-        body: JSON.stringify({ name: '百度网盘', ...baiduApp }),
+        body: JSON.stringify({ name: '百度网盘' }),
       });
       setBaiduAuthorization(authorization);
-      setBaiduApp((current) => ({ ...current, secretKey: '' }));
     } catch (cause) {
       setCloudError(cause instanceof Error ? cause.message : '无法开始百度授权');
     } finally {
@@ -286,7 +310,7 @@ export function MediaLibraryView() {
         transientFailures = 0;
         if (result.state === 'authorized') {
           setBaiduAuthorization(undefined);
-          await Promise.all([loadCloudSources(), loadLibrary()]);
+          await Promise.all([loadCloudSources(), loadCloudConnectors(), loadLibrary()]);
           return;
         }
         schedule(Math.max(5, result.retryAfterSeconds || baiduAuthorization.intervalSeconds));
@@ -482,28 +506,45 @@ export function MediaLibraryView() {
               <button className={cloudProvider === 'baidu' ? 'active' : ''} onClick={() => { setCloudProvider('baidu'); setWebDav((current) => ({ ...current, rootPath: '/Baidu' })); }}>百度网盘</button>
             </div>
 
-            {cloudProvider === 'baidu' && <label className="cloud-method">接入方式<select aria-label="百度网盘接入方式" value={baiduConnection} onChange={(event) => setBaiduConnection(event.target.value as 'official' | 'webdav')}><option value="official">百度官方 API（推荐）</option><option value="webdav">本机 OpenList WebDAV</option></select></label>}
-
-            {cloudProvider === 'baidu' && baiduConnection === 'official' ? (
+            {cloudProvider === 'baidu' ? (
               <form className="cloud-form" onSubmit={startBaiduAuthorization}>
-                <div className="cloud-notice"><strong>官方设备码授权</strong><span>请先在百度网盘开放平台创建“软件”应用。新应用默认只能访问“我的应用数据/应用名”。AppKey 与 SecretKey 仅加密保存在这台电脑。</span></div>
-                <label>应用目录名称<input required aria-label="百度应用目录名称" value={baiduApp.appFolder} onChange={(event) => setBaiduApp({ ...baiduApp, appFolder: event.target.value })} placeholder="Localis" /></label>
-                <label>AppKey<input required aria-label="百度 AppKey" value={baiduApp.appKey} onChange={(event) => setBaiduApp({ ...baiduApp, appKey: event.target.value })} autoComplete="off" /></label>
-                <label>SecretKey<input required aria-label="百度 SecretKey" type="password" value={baiduApp.secretKey} onChange={(event) => setBaiduApp({ ...baiduApp, secretKey: event.target.value })} autoComplete="new-password" /></label>
+                <div className="cloud-login-hero">
+                  <span className="cloud-provider-mark baidu" aria-hidden="true">度</span>
+                  <div><strong>扫码登录百度网盘</strong><span>无需在网页中填写 AppKey、SecretKey、地址或密码。授权完成后，媒体会自动出现在资料库。</span></div>
+                </div>
+                <div className={`cloud-notice ${cloudConnectors?.baidu.available ? 'ready' : 'warning'}`}>
+                  <strong>{cloudConnectors?.baidu.available ? '官方设备码已就绪' : '等待 Localis 发布者配置官方应用'}</strong>
+                  <span>{cloudConnectors?.baidu.available
+                    ? `扫码后只读取“我的应用数据/${cloudConnectors.baidu.appFolder}”中的媒体；网盘文件仍由这台电脑读取。`
+                    : cloudConnectors?.baidu.unavailableReason || '正在检查百度网盘登录能力…'}</span>
+                </div>
                 {baiduAuthorization && <div className="baidu-authorization"><img src={baiduAuthorization.qrCodeDataUrl} alt="百度网盘授权二维码" /><div><strong>使用百度网盘 App 扫码授权</strong><span>用户码：{baiduAuthorization.userCode || '见授权页面'}</span><a href={baiduAuthorization.verificationUrl} target="_blank" rel="noreferrer">打开百度授权页面</a><small>Localis 正在等待授权结果，短暂断网会自动重试。</small><button type="button" onClick={() => void cancelBaiduLink()}>取消本次授权</button></div></div>}
                 {cloudError && <div className="inline-error folder-error" role="alert">{cloudError}</div>}
-                <div><button type="button" onClick={() => setCloudOpen(false)}>关闭</button><button className="add-button" disabled={cloudBusy || Boolean(baiduAuthorization)}>{baiduAuthorization ? '等待扫码…' : cloudBusy ? '正在连接…' : '获取授权二维码'}</button></div>
+                {!cloudConnectors?.baidu.available && <details className="cloud-advanced"><summary>为什么这里没有配置输入框？</summary><p>百度官方授权仍要求应用身份。Localis 只允许发布者在电脑端安全配置一次，绝不让普通用户在 Vision Pro 页面传输 SecretKey；公共版本还需要通过百度开放平台审核。</p></details>}
+                <div><button type="button" onClick={() => setCloudOpen(false)}>关闭</button><button className="add-button" disabled={cloudBusy || Boolean(baiduAuthorization) || !cloudConnectors?.baidu.available}>{baiduAuthorization ? '等待扫码…' : cloudBusy ? '正在连接…' : '显示登录二维码'}</button></div>
               </form>
             ) : (
-              <form className="cloud-form" onSubmit={connectWebDav}>
-                <div className="cloud-notice"><strong>{cloudProvider === 'quark' ? '夸克仅支持第三方只读桥接' : 'OpenList 高级兼容方式'}</strong><span>Localis 不抓取网盘 Cookie。请让 OpenList 只监听 127.0.0.1，并创建仅有 WebDAV Read 权限的 localis-reader 用户；在对应存储设置中把“WebDAV 策略”设为“本机代理（Native Proxy）”。</span></div>
-                <label>OpenList WebDAV 地址<input required aria-label="OpenList WebDAV 地址" value={webDav.baseUrl} onChange={(event) => setWebDav({ ...webDav, baseUrl: event.target.value })} placeholder="http://127.0.0.1:5244/dav/" /></label>
-                <label>云盘挂载路径<input required aria-label="云盘挂载路径" value={webDav.rootPath} onChange={(event) => setWebDav({ ...webDav, rootPath: event.target.value })} placeholder={cloudProvider === 'quark' ? '/Quark' : '/Baidu'} /></label>
-                <label>只读用户名<input required aria-label="OpenList 只读用户名" value={webDav.username} onChange={(event) => setWebDav({ ...webDav, username: event.target.value })} autoComplete="username" /></label>
-                <label>只读密码<input required aria-label="OpenList 只读密码" type="password" value={webDav.password} onChange={(event) => setWebDav({ ...webDav, password: event.target.value })} autoComplete="current-password" /></label>
+              <div className="cloud-form">
+                <div className="cloud-login-hero">
+                  <span className="cloud-provider-mark quark" aria-hidden="true">夸</span>
+                  <div><strong>扫码登录夸克网盘</strong><span>目标体验已经预留，但当前没有安全、公开且支持目录与 Range 播放的官方接口。</span></div>
+                </div>
+                <div className="cloud-notice warning"><strong>暂不启用不安全的“假直连”</strong><span>{cloudConnectors?.quark.unavailableReason || '正在检查夸克网盘登录能力…'}</span></div>
+                <button className="cloud-unavailable-button" type="button" disabled>等待夸克官方开放直连接口</button>
+                <details className="cloud-advanced">
+                  <summary>高级兼容：我已有本机 OpenList</summary>
+                  <form className="cloud-form advanced-webdav-form" onSubmit={connectWebDav}>
+                    <div className="cloud-notice"><strong>仅连接你已经信任的本机只读桥接</strong><span>OpenList 必须只监听 127.0.0.1，并使用单独的 WebDAV Read 账号和 Native Proxy。Localis 不抓取夸克 Cookie，也不会自动安装会把登录票据交给第三方的驱动。</span></div>
+                    <label>OpenList WebDAV 地址<input required aria-label="OpenList WebDAV 地址" value={webDav.baseUrl} onChange={(event) => setWebDav({ ...webDav, baseUrl: event.target.value })} placeholder="http://127.0.0.1:5244/dav/" /></label>
+                    <label>云盘挂载路径<input required aria-label="云盘挂载路径" value={webDav.rootPath} onChange={(event) => setWebDav({ ...webDav, rootPath: event.target.value })} placeholder="/Quark" /></label>
+                    <label>只读用户名<input required aria-label="OpenList 只读用户名" value={webDav.username} onChange={(event) => setWebDav({ ...webDav, username: event.target.value })} autoComplete="username" /></label>
+                    <label>只读密码<input required aria-label="OpenList 只读密码" type="password" value={webDav.password} onChange={(event) => setWebDav({ ...webDav, password: event.target.value })} autoComplete="current-password" /></label>
+                    <button className="add-button" disabled={cloudBusy}>{cloudBusy ? '正在测试并扫描…' : '连接现有桥接'}</button>
+                  </form>
+                </details>
                 {cloudError && <div className="inline-error folder-error" role="alert">{cloudError}</div>}
-                <div><button type="button" onClick={() => setCloudOpen(false)}>关闭</button><button className="add-button" disabled={cloudBusy}>{cloudBusy ? '正在测试并扫描…' : '连接并扫描'}</button></div>
-              </form>
+                <div><button type="button" onClick={() => setCloudOpen(false)}>关闭</button></div>
+              </div>
             )}
           </section>
         </div>

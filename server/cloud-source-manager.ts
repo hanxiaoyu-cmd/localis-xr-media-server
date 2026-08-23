@@ -56,6 +56,31 @@ export interface CloudSourceSummary {
   error?: string;
 }
 
+export interface BaiduAuthorizationView {
+  sessionId: string;
+  userCode: string;
+  verificationUrl: string;
+  qrCodeDataUrl: string;
+  expiresAt: string;
+  intervalSeconds: number;
+}
+
+export interface CloudConnectorCapabilities {
+  baidu: {
+    available: boolean;
+    login: 'qr';
+    appFolder: string;
+    activeAuthorization?: BaiduAuthorizationView;
+    unavailableReason?: string;
+  };
+  quark: {
+    available: false;
+    login: 'official-api-required';
+    advancedWebDavAvailable: true;
+    unavailableReason: string;
+  };
+}
+
 export interface CloudRemoteFile {
   id: string;
   sourceId: string;
@@ -430,6 +455,48 @@ export class CloudSourceManager {
     return [...this.remoteFiles.values()];
   }
 
+  private pruneBaiduAuthorizations() {
+    for (const [id, pending] of this.pendingBaidu) {
+      if (pending.expiresAt <= Date.now()) this.pendingBaidu.delete(id);
+    }
+  }
+
+  private baiduAuthorizationView(pending: PendingBaiduAuthorization): BaiduAuthorizationView {
+    return {
+      sessionId: pending.id,
+      userCode: pending.userCode,
+      verificationUrl: pending.verificationUrl,
+      qrCodeDataUrl: pending.qrCodeDataUrl,
+      expiresAt: new Date(pending.expiresAt).toISOString(),
+      intervalSeconds: pending.intervalMs / 1000,
+    };
+  }
+
+  connectorCapabilities(): CloudConnectorCapabilities {
+    this.pruneBaiduAuthorizations();
+    const baiduAvailable = Boolean(this.config.baiduAppKey?.trim() && this.config.baiduSecretKey?.trim());
+    const activeAuthorization = baiduAvailable
+      ? [...this.pendingBaidu.values()].find((pending) => pending.appKey === this.config.baiduAppKey?.trim())
+      : undefined;
+    return {
+      baidu: {
+        available: baiduAvailable,
+        login: 'qr',
+        appFolder: this.config.baiduAppFolder?.trim() || 'Localis',
+        activeAuthorization: activeAuthorization ? this.baiduAuthorizationView(activeAuthorization) : undefined,
+        unavailableReason: baiduAvailable
+          ? undefined
+          : '这个 Localis 构建尚未配置已审核的百度网盘应用，因此不能安全地代替用户发起扫码登录。',
+      },
+      quark: {
+        available: false,
+        login: 'official-api-required',
+        advancedWebDavAvailable: true,
+        unavailableReason: '夸克尚未向 Localis 开放可嵌入的扫码、目录浏览与 Range 播放接口；为保护账号，Localis 不调用私有 Cookie 接口或明文第三方换票服务。',
+      },
+    };
+  }
+
   file(id: string) {
     return this.remoteFiles.get(id);
   }
@@ -565,15 +632,24 @@ export class CloudSourceManager {
     return this.summaries().find((candidate) => candidate.id === source.id)!;
   }
 
-  async startBaiduAuthorization(input: { name?: string; appFolder: string; appKey: string; secretKey: string }) {
-    for (const [id, pending] of this.pendingBaidu) if (pending.expiresAt <= Date.now()) this.pendingBaidu.delete(id);
-    if (this.pendingBaidu.size >= 10) throw new CloudSourceError('too_many_baidu_sessions', '等待授权的百度会话过多，请稍后再试。', 429);
-    const appKey = input.appKey.trim();
-    const secretKey = input.secretKey.trim();
-    const appFolder = input.appFolder.trim().replace(/^\/+|\/+$/g, '');
+  async startBaiduAuthorization(input: { name?: string; appFolder?: string; appKey?: string; secretKey?: string } = {}) {
+    this.pruneBaiduAuthorizations();
+    const appKey = (input.appKey || this.config.baiduAppKey || '').trim();
+    const secretKey = (input.secretKey || this.config.baiduSecretKey || '').trim();
+    const appFolder = (input.appFolder || this.config.baiduAppFolder || 'Localis').trim().replace(/^\/+|\/+$/g, '');
+    if (!appKey || !secretKey) {
+      throw new CloudSourceError(
+        'baidu_connector_unconfigured',
+        '这个 Localis 构建尚未接入已审核的百度网盘应用。发布者完成应用审核与服务器凭据配置后，用户即可只扫码登录。',
+        503,
+      );
+    }
     if (!appKey || !secretKey || !appFolder || appFolder.length > 100 || appFolder.includes('..') || /[\\/\0-\x1f]/.test(appFolder)) {
       throw new CloudSourceError('invalid_baidu_app', '请填写有效的百度 AppKey、SecretKey 和单层应用目录名称。');
     }
+    const reusable = [...this.pendingBaidu.values()].find((pending) => pending.appKey === appKey && pending.appFolder === appFolder);
+    if (reusable) return this.baiduAuthorizationView(reusable);
+    if (this.pendingBaidu.size >= 10) throw new CloudSourceError('too_many_baidu_sessions', '等待授权的百度会话过多，请稍后再试。', 429);
     const url = new URL('/oauth/2.0/device/code', this.endpoints.baiduOAuth);
     url.search = new URLSearchParams({ response_type: 'device_code', client_id: appKey, scope: 'basic,netdisk' }).toString();
     const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
@@ -598,14 +674,7 @@ export class CloudSourceManager {
       nextPollAt: Date.now(),
     };
     this.pendingBaidu.set(pending.id, pending);
-    return {
-      sessionId: pending.id,
-      userCode: pending.userCode,
-      verificationUrl: pending.verificationUrl,
-      qrCodeDataUrl: pending.qrCodeDataUrl,
-      expiresAt: new Date(pending.expiresAt).toISOString(),
-      intervalSeconds: pending.intervalMs / 1000,
-    };
+    return this.baiduAuthorizationView(pending);
   }
 
   async pollBaiduAuthorization(sessionId: string) {
