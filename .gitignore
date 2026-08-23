@@ -37,6 +37,7 @@ yarn-error.log*
 .env*
 !.env.example
 /.localis/
+/.localis-*/
 *.tsbuildinfo
 
 # deployment and generated files

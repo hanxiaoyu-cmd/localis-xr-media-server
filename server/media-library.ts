@@ -4,6 +4,7 @@ import { createReadStream } from 'node:fs';
 import { access, lstat, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import type { CloudRemoteFile, CloudSourceManager } from './cloud-source-manager';
 import type {
   EyeOrder,
   LocalisConfig,
@@ -33,6 +34,7 @@ interface ProbeStream {
   profile?: string;
   level?: number;
   pix_fmt?: string;
+  sample_aspect_ratio?: string;
   width?: number;
   height?: number;
   avg_frame_rate?: string;
@@ -84,13 +86,13 @@ export function inferProjection(fileName: string): Pick<MediaItem, 'projection' 
 }
 
 function publicItem(item: MediaItem): PublicMediaItem {
-  const { path: _path, libraryRoot: _root, ...safe } = item;
+  const { path: _path, libraryRoot: _root, sourceId: _sourceId, remoteFileId: _remoteFileId, ...safe } = item;
   return {
     ...safe,
     subtitleTracks: item.subtitleTracks.map(({ externalPath: _externalPath, ...track }) => track),
     streamUrl: `/api/media/${item.id}/stream`,
-    posterUrl: item.kind === 'video' ? `/api/media/${item.id}/poster` : undefined,
-    hlsUrl: `/api/media/${item.id}/hls/index.m3u8`,
+    posterUrl: item.kind === 'video' && item.sourceType === 'local' ? `/api/media/${item.id}/poster` : undefined,
+    hlsUrl: `/api/media/${item.id}/hls/off/index.m3u8`,
   };
 }
 
@@ -99,7 +101,7 @@ export class MediaLibrary {
   private overrides = new Map<string, MediaOverride>();
   private scanPromise?: Promise<void>;
 
-  constructor(private readonly config: LocalisConfig) {}
+  constructor(private readonly config: LocalisConfig, private readonly clouds?: CloudSourceManager) {}
 
   async initialize() {
     try {
@@ -108,6 +110,7 @@ export class MediaLibrary {
     } catch {
       // Overrides are optional.
     }
+    if (this.clouds) await this.clouds.refreshAll();
     await this.scan();
   }
 
@@ -127,6 +130,11 @@ export class MediaLibrary {
     return this.scanPromise;
   }
 
+  async refreshClouds() {
+    if (this.clouds) await this.clouds.refreshAll();
+    await this.scan();
+  }
+
   private async performScan() {
     const files: Array<{ path: string; root: string }> = [];
     for (const root of this.config.mediaDirs) await this.walk(root, root, files);
@@ -144,8 +152,47 @@ export class MediaLibrary {
       }
     });
     await Promise.all(workers);
+    if (this.clouds) {
+      for (const file of this.clouds.files()) {
+        const item = this.cloudItem(file);
+        next.set(item.id, item);
+      }
+    }
     this.items.clear();
     for (const [id, item] of next) this.items.set(id, item);
+  }
+
+  private cloudItem(file: CloudRemoteFile): MediaItem {
+    const extension = path.extname(file.fileName).toLowerCase();
+    const kind: MediaKind = directAudioExtensions.has(extension) || ['.m4b', '.alac', '.ape', '.wma', '.mka', '.aiff', '.aif', '.ac3', '.eac3', '.dts', '.mp2', '.amr'].includes(extension)
+      ? 'audio'
+      : 'video';
+    const id = stableId(`cloud:${file.sourceId}:${file.id}`);
+    const inferred = inferProjection(path.basename(file.fileName, extension));
+    const override = this.overrides.get(id) ?? {};
+    return {
+      id,
+      kind,
+      title: override.title || path.basename(file.fileName, extension).replace(/[._]+/g, ' '),
+      fileName: file.fileName,
+      relativePath: `${file.sourceName}/${file.relativePath}`,
+      extension,
+      size: file.size,
+      modifiedAt: file.modifiedAt,
+      duration: 0,
+      projection: override.projection ?? inferred.projection,
+      stereo: override.stereo ?? inferred.stereo,
+      eyeOrder: override.eyeOrder ?? inferred.eyeOrder,
+      yawOffset: override.yawOffset ?? inferred.yawOffset,
+      audioTracks: [],
+      subtitleTracks: [],
+      directPlay: kind === 'video' ? directVideoExtensions.has(extension) : directAudioExtensions.has(extension),
+      sourceType: file.provider === 'baidu' ? 'baidu' : 'webdav',
+      sourceId: file.sourceId,
+      remoteFileId: file.id,
+      path: `cloud:${file.id}`,
+      libraryRoot: file.sourceName,
+    };
   }
 
   private async walk(root: string, current: string, files: Array<{ path: string; root: string }>) {
@@ -217,6 +264,7 @@ export class MediaLibrary {
       videoProfile: video?.profile,
       videoLevel: video?.level,
       pixelFormat: video?.pix_fmt,
+      sampleAspectRatio: video?.sample_aspect_ratio,
       audioCodec: audio?.codec_name,
       container: probe.format?.format_name,
       projection: override.projection ?? inferred.projection,
@@ -232,6 +280,7 @@ export class MediaLibrary {
       })),
       subtitleTracks: [...embeddedTracks, ...externalTracks],
       directPlay,
+      sourceType: 'local',
       path: filePath,
       libraryRoot,
     };

@@ -11,7 +11,12 @@ import { PairingAuth } from '../server/auth';
 import { MediaLibrary } from '../server/media-library';
 import { FolderPickerBusyError } from '../server/folder-picker';
 import { ProgressStore } from '../server/progress-store';
-import { TRANSCODE_CACHE_SCHEMA, TranscodeManager } from '../server/transcode-manager';
+import {
+  TRANSCODE_ACTIVITY_LEASE_MS,
+  TRANSCODE_CACHE_SCHEMA,
+  TranscodeManager,
+} from '../server/transcode-manager';
+import { ServerSuperResolutionUnavailableError, serverSuperResolutionPlan } from '../server/super-resolution';
 import type { LocalisConfig } from '../server/types';
 
 const execFileAsync = promisify(execFile);
@@ -85,6 +90,8 @@ describe('Localis API', () => {
     await request(api).post('/api/library/refresh').set('Host', 'localhost').set('Origin', 'http://localhost:4444').expect(403);
     const item = deps.library.list()[0];
     await host(request(api).get(`/api/media/${item.id}/hls/%2e%2e%5csecret`)).expect(404);
+    const invalidLevel = await host(request(api).get(`/api/media/${item.id}/hls/not-a-level/index.m3u8`)).expect(400);
+    expect(invalidLevel.body).toMatchObject({ error: 'invalid_super_resolution_level' });
     const legacy = deps.library.list().find((candidate) => candidate.title === 'legacy-transcode')!;
     await host(request(api).get(`/api/media/${legacy.id}/hls/seg_999999.m4s`)).expect(404);
     expect(deps.transcodes.statusForItem(deps.library.get(legacy.id)!)).toMatchObject({ state: 'idle' });
@@ -158,6 +165,59 @@ describe('Localis API', () => {
       expect.objectContaining({ codec_name: 'h264', codec_type: 'video', pix_fmt: 'yuv420p' }),
       expect.objectContaining({ codec_name: 'aac', codec_type: 'audio' }),
     ]));
+  });
+
+  it('forces a direct-playable video through the computer-side Standard profile at the planned dimensions', async () => {
+    const listed = deps.library.list().find((candidate) => candidate.title === 'flat-demo')!;
+    const item = deps.library.get(listed.id)!;
+    const plan = serverSuperResolutionPlan(item, 'standard');
+    expect(deps.transcodes.decideMode(item, 'off')).not.toBe('transcode');
+    expect(deps.transcodes.decideMode(item, 'standard')).toBe('transcode');
+
+    await host(request(api).get(`/api/media/${item.id}/hls/standard/index.m3u8`)).expect(200);
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (deps.transcodes.statusForItem(item, 'standard').state === 'ready') break;
+      await wait(100);
+    }
+    expect(deps.transcodes.statusForItem(item, 'standard')).toMatchObject({
+      state: 'ready', mode: 'transcode', superResolution: 'standard',
+      plan: { outputWidth: plan.outputWidth, outputHeight: plan.outputHeight },
+    });
+    const job = deps.transcodes.jobForItem(item, 'standard')!;
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,codec_name,pix_fmt,level', '-of', 'json', job.playlistPath,
+    ], { windowsHide: true });
+    const encoded = (JSON.parse(stdout) as { streams: Array<{ width: number; height: number; codec_name: string; pix_fmt: string; level: number }> }).streams[0];
+    expect(encoded)
+      .toMatchObject({ width: plan.outputWidth, height: plan.outputHeight, codec_name: 'h264', pix_fmt: 'yuv420p' });
+    expect(encoded.level).toBeLessThanOrEqual(52);
+    expect(deps.transcodes.jobForItem(item, 'off')?.key).not.toBe(job.key);
+
+    const spherical = deps.library.get(deps.library.list().find((candidate) => candidate.title === 'demo-360-mono')!.id)!;
+    const sphericalPlan = serverSuperResolutionPlan(spherical, 'high');
+    await host(request(api).get(`/api/media/${spherical.id}/hls/high/index.m3u8`)).expect(200);
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (deps.transcodes.statusForItem(spherical, 'high').state === 'ready') break;
+      await wait(100);
+    }
+    const sphericalJob = deps.transcodes.jobForItem(spherical, 'high')!;
+    expect(sphericalJob.state).toBe('ready');
+    const sphericalProbe = await execFileAsync('ffprobe', [
+      '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', sphericalJob.playlistPath,
+    ], { windowsHide: true });
+    expect((JSON.parse(sphericalProbe.stdout) as { streams: Array<{ width: number; height: number }> }).streams[0])
+      .toMatchObject({ width: sphericalPlan.outputWidth, height: sphericalPlan.outputHeight });
+  });
+
+  it('reports an explicit unavailable state instead of downsampling an unsafe enhanced source', async () => {
+    const listed = deps.library.list().find((candidate) => candidate.title === 'flat-demo')!;
+    const source = deps.library.get(listed.id)!;
+    const unsafe = { ...source, width: 5760, height: 2880, frameRate: 60, stereo: 'sbs' as const };
+    expect(deps.transcodes.statusForItem(unsafe, 'standard')).toMatchObject({
+      state: 'unavailable',
+      plan: { available: false, outputWidth: 5760, outputHeight: 2880 },
+    });
+    await expect(deps.transcodes.ensure(unsafe, 'standard')).rejects.toBeInstanceOf(ServerSuperResolutionUnavailableError);
   });
 
   it('falls back to another proven encoder when the preferred encoder rejects a tiny frame', async () => {
@@ -237,7 +297,7 @@ describe('Localis API', () => {
     expect(numerator / denominator).toBeLessThanOrEqual(60);
   });
 
-  it('does not reuse a complete v2 HLS cache entry after the v3 pipeline change', async () => {
+  it('does not reuse a complete v3 HLS cache entry after the server-SR pipeline change', async () => {
     const isolatedRoot = await mkdtemp(path.join(os.tmpdir(), 'localis-cache-schema-'));
     const isolatedConfig: LocalisConfig = {
       ...deps.config,
@@ -253,10 +313,13 @@ describe('Localis API', () => {
       expect(mode).toBe('remux');
 
       const keyFor = (schema: string) => createHash('sha256')
-        .update([schema, item.id, item.size, item.modifiedAt, mode, 'copy'].join('|'))
+        .update([
+          schema, item.id, item.size, item.modifiedAt, mode, 'off', item.projection,
+          item.stereo, item.sampleAspectRatio || '1:1', 'copy',
+        ].join('|'))
         .digest('hex')
         .slice(0, 32);
-      const legacyKey = keyFor('v2');
+      const legacyKey = keyFor('v3');
       const legacyDirectory = path.join(isolatedConfig.cacheDir, 'hls', legacyKey);
       await mkdir(legacyDirectory, { recursive: true });
       await Promise.all([
@@ -269,7 +332,7 @@ describe('Localis API', () => {
           '#EXTINF:1.0,',
           'seg_000000.m4s',
           '#EXT-X-ENDLIST',
-          '# legacy-v2-cache',
+          '# legacy-v3-cache',
           '',
         ].join('\n')),
       ]);
@@ -278,7 +341,7 @@ describe('Localis API', () => {
       expect(job.key).toBe(keyFor(TRANSCODE_CACHE_SCHEMA));
       expect(job.key).not.toBe(legacyKey);
       expect(job.directory).not.toBe(legacyDirectory);
-      expect(await readFile(path.join(legacyDirectory, 'index.m3u8'), 'utf8')).toContain('legacy-v2-cache');
+      expect(await readFile(path.join(legacyDirectory, 'index.m3u8'), 'utf8')).toContain('legacy-v3-cache');
     } finally {
       transcodes.shutdown();
       await wait(100);
@@ -296,18 +359,28 @@ describe('Localis API', () => {
     };
     const transcodes = new TranscodeManager(isolatedConfig);
     const occupiedKey = 'occupied-slot';
-    transcodes.jobs.set(occupiedKey, {
+    const occupiedJob = {
       key: occupiedKey,
       itemId: 'another-media-item',
       directory: path.join(isolatedConfig.cacheDir, 'hls', occupiedKey),
       playlistPath: path.join(isolatedConfig.cacheDir, 'hls', occupiedKey, 'index.m3u8'),
       mode: 'transcode',
+      superResolution: 'off',
+      superResolutionPlan: serverSuperResolutionPlan({ stereo: 'mono' }, 'off'),
       encoder: 'libx264',
       state: 'running',
       progressSeconds: 0,
       startedAt: new Date().toISOString(),
-      lastAccessAt: Date.now(),
-    });
+      lastAccessAt: Date.now() - TRANSCODE_ACTIVITY_LEASE_MS - 1_000,
+      leaseExpiresAt: Date.now() - 1_000,
+    } satisfies Parameters<typeof transcodes.resolveAsset>[0];
+    transcodes.jobs.set(occupiedKey, occupiedJob);
+    // Playlist and segment requests from any number of clients share and renew
+    // the same job lease, so another profile cannot reclaim an actively viewed stream.
+    expect(transcodes.resolveAsset(occupiedJob, 'index.m3u8')).toBe(occupiedJob.playlistPath);
+    const firstRenewal = occupiedJob.leaseExpiresAt;
+    expect(transcodes.resolveAsset(occupiedJob, 'seg_000001.m4s')).toContain('seg_000001.m4s');
+    expect(occupiedJob.leaseExpiresAt).toBeGreaterThanOrEqual(firstRenewal);
     const isolatedApi = createApiApp({
       config: isolatedConfig,
       library: deps.library,
@@ -328,6 +401,116 @@ describe('Localis API', () => {
     } finally {
       transcodes.shutdown();
       await wait(100);
+      await rm(isolatedRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reclaims an expired global transcode lease while preserving active leases', async () => {
+    const isolatedRoot = await mkdtemp(path.join(os.tmpdir(), 'localis-profile-switch-'));
+    const isolatedConfig: LocalisConfig = {
+      ...deps.config,
+      dataDir: isolatedRoot,
+      cacheDir: path.join(isolatedRoot, 'cache'),
+      maxTranscodes: 1,
+    };
+    const transcodes = new TranscodeManager(isolatedConfig);
+    const item = deps.library.list().find((candidate) => candidate.title === 'flat-demo')!;
+    const source = deps.library.get(item.id)!;
+    const staleKey = 'abandoned-standard-profile';
+    transcodes.jobs.set(staleKey, {
+      key: staleKey,
+      itemId: 'a-different-abandoned-media-item',
+      directory: path.join(isolatedConfig.cacheDir, 'hls', staleKey),
+      playlistPath: path.join(isolatedConfig.cacheDir, 'hls', staleKey, 'index.m3u8'),
+      mode: 'transcode',
+      superResolution: 'standard',
+      superResolutionPlan: serverSuperResolutionPlan(source, 'standard'),
+      encoder: 'libx264',
+      state: 'running',
+      progressSeconds: 0,
+      startedAt: new Date().toISOString(),
+      lastAccessAt: Date.now() - TRANSCODE_ACTIVITY_LEASE_MS - 1_000,
+      leaseExpiresAt: Date.now() - 1_000,
+    });
+    const isolatedApi = createApiApp({
+      config: isolatedConfig,
+      library: deps.library,
+      auth: deps.auth,
+      progress: deps.progress,
+      transcodes,
+    });
+    try {
+      await host(request(isolatedApi).get(`/api/media/${source.id}/hls/high/index.m3u8`)).expect(200);
+      expect(transcodes.jobs.has(staleKey)).toBe(false);
+      expect(transcodes.jobForItem(source, 'high')).toBeTruthy();
+    } finally {
+      transcodes.shutdown();
+      await wait(100);
+      await rm(isolatedRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('proactively sweeps abandoned work without touching a shared active stream', async () => {
+    const isolatedRoot = await mkdtemp(path.join(os.tmpdir(), 'localis-idle-sweep-'));
+    const isolatedConfig: LocalisConfig = {
+      ...deps.config,
+      dataDir: isolatedRoot,
+      cacheDir: path.join(isolatedRoot, 'cache'),
+      maxTranscodes: 2,
+    };
+    const transcodes = new TranscodeManager(isolatedConfig);
+    const source = deps.library.get(deps.library.list().find((candidate) => candidate.title === 'flat-demo')!.id)!;
+    const makeJob = (key: string, leaseExpiresAt: number) => ({
+      key,
+      itemId: key,
+      directory: path.join(isolatedConfig.cacheDir, 'hls', key),
+      playlistPath: path.join(isolatedConfig.cacheDir, 'hls', key, 'index.m3u8'),
+      mode: 'transcode' as const,
+      superResolution: 'standard' as const,
+      superResolutionPlan: serverSuperResolutionPlan(source, 'standard'),
+      encoder: 'libx264',
+      state: 'running' as const,
+      progressSeconds: 0,
+      startedAt: new Date().toISOString(),
+      lastAccessAt: leaseExpiresAt - TRANSCODE_ACTIVITY_LEASE_MS,
+      leaseExpiresAt,
+    });
+    const abandoned = makeJob('abandoned-job', Date.now() - 1_000);
+    const sharedActive = makeJob('shared-active-job', Date.now() - 1_000);
+    transcodes.jobs.set(abandoned.key, abandoned);
+    transcodes.jobs.set(sharedActive.key, sharedActive);
+    // Any headset requesting the shared playlist or a segment renews the job's
+    // single activity lease on behalf of every viewer of that same HLS stream.
+    transcodes.resolveAsset(sharedActive, 'index.m3u8');
+    transcodes.resolveAsset(sharedActive, 'seg_000001.m4s');
+
+    try {
+      await transcodes.sweepExpiredJobs();
+      expect(transcodes.jobs.has(abandoned.key)).toBe(false);
+      expect(transcodes.jobs.get(sharedActive.key)).toBe(sharedActive);
+      expect(sharedActive.leaseExpiresAt).toBeGreaterThan(Date.now());
+    } finally {
+      transcodes.shutdown();
+      await rm(isolatedRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('starts an unreferenced idle sweeper during initialization and clears it on shutdown', async () => {
+    const isolatedRoot = await mkdtemp(path.join(os.tmpdir(), 'localis-sweep-lifecycle-'));
+    const transcodes = new TranscodeManager({
+      ...deps.config,
+      dataDir: isolatedRoot,
+      cacheDir: path.join(isolatedRoot, 'cache'),
+    });
+    const lifecycle = transcodes as unknown as { sweepTimer?: ReturnType<typeof setInterval> };
+    try {
+      await transcodes.initialize();
+      expect(lifecycle.sweepTimer).toBeDefined();
+      expect(lifecycle.sweepTimer?.hasRef()).toBe(false);
+      transcodes.shutdown();
+      expect(lifecycle.sweepTimer).toBeUndefined();
+    } finally {
+      transcodes.shutdown();
       await rm(isolatedRoot, { recursive: true, force: true });
     }
   });

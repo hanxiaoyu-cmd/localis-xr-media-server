@@ -2,6 +2,7 @@ export type MediaKind = 'video' | 'audio';
 export type Projection = 'flat' | 'equirect180' | 'equirect360';
 export type StereoLayout = 'mono' | 'sbs' | 'tb';
 export type EyeOrder = 'lr' | 'rl';
+export type MediaSourceType = 'local' | 'webdav' | 'baidu';
 
 export interface MediaTrack {
   index: number;
@@ -33,6 +34,7 @@ export interface MediaItem {
   videoProfile?: string;
   videoLevel?: number;
   pixelFormat?: string;
+  sampleAspectRatio?: string;
   audioCodec?: string;
   container?: string;
   projection: Projection;
@@ -42,11 +44,14 @@ export interface MediaItem {
   audioTracks: MediaTrack[];
   subtitleTracks: SubtitleTrack[];
   directPlay: boolean;
+  sourceType: MediaSourceType;
+  sourceId?: string;
+  remoteFileId?: string;
   path: string;
   libraryRoot: string;
 }
 
-export type PublicMediaItem = Omit<MediaItem, 'path' | 'libraryRoot'> & {
+export type PublicMediaItem = Omit<MediaItem, 'path' | 'libraryRoot' | 'sourceId' | 'remoteFileId'> & {
   streamUrl: string;
   posterUrl?: string;
   hlsUrl: string;
@@ -70,6 +75,8 @@ export interface LocalisConfig {
   ffprobePath: string;
   maxTranscodes: number;
   maxCacheBytes?: number;
+  cloudCacheBytes?: number;
+  maxCloudDownloads?: number;
 }
 
 export interface PlaybackProgress {

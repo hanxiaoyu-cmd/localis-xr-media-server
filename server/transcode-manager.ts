@@ -4,6 +4,14 @@ import { access, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { LocalisConfig, MediaItem } from './types';
+import {
+  buildVideoPipeline,
+  serverSuperResolutionPlan,
+  SERVER_SUPER_RESOLUTION_PROFILES,
+  ServerSuperResolutionUnavailableError,
+  type ServerSuperResolutionLevel,
+  type ServerSuperResolutionPlan,
+} from './super-resolution';
 
 export type TranscodeMode = 'remux' | 'audio-transcode' | 'transcode';
 export type JobState = 'preparing' | 'running' | 'ready' | 'failed';
@@ -11,7 +19,7 @@ export type JobState = 'preparing' | 'running' | 'ready' | 'failed';
 export class SourceChangedError extends Error {}
 export class TranscodeCapacityError extends Error {}
 
-export const TRANSCODE_CACHE_SCHEMA = 'v3';
+export const TRANSCODE_CACHE_SCHEMA = 'v5-server-sr-safe';
 
 export interface TranscodeJob {
   key: string;
@@ -19,15 +27,25 @@ export interface TranscodeJob {
   directory: string;
   playlistPath: string;
   mode: TranscodeMode;
+  superResolution: ServerSuperResolutionLevel;
+  superResolutionPlan: ServerSuperResolutionPlan;
   encoder: string;
   state: JobState;
   progressSeconds: number;
   error?: string;
   failedAt?: number;
+  cancelled?: boolean;
   process?: ChildProcessWithoutNullStreams;
   startedAt: string;
   lastAccessAt: number;
+  leaseExpiresAt?: number;
 }
+
+// Running EVENT playlists are refreshed continually by active HLS clients.
+// A full minute covers normal buffering gaps while still allowing an
+// abandoned full-file transcode to be reclaimed when capacity is needed.
+export const TRANSCODE_ACTIVITY_LEASE_MS = 60_000;
+export const TRANSCODE_IDLE_SWEEP_INTERVAL_MS = 15_000;
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -68,9 +86,22 @@ export class TranscodeManager {
   private readonly inflight = new Map<string, Promise<TranscodeJob>>();
   private availableEncoders = ['libx264'];
   private prunePromise?: Promise<void>;
+  private sweepPromise?: Promise<void>;
+  private sweepTimer?: ReturnType<typeof setInterval>;
+  private readonly cancellationPromises = new Map<string, Promise<void>>();
   encoder = 'libx264';
 
   constructor(private readonly config: LocalisConfig) {}
+
+  private touchJob(job: TranscodeJob) {
+    const now = Date.now();
+    job.lastAccessAt = now;
+    job.leaseExpiresAt = now + TRANSCODE_ACTIVITY_LEASE_MS;
+  }
+
+  private hasActiveLease(job: TranscodeJob, now = Date.now()) {
+    return (job.leaseExpiresAt ?? job.lastAccessAt + TRANSCODE_ACTIVITY_LEASE_MS) > now;
+  }
 
   async initialize() {
     const hlsRoot = path.join(this.config.cacheDir, 'hls');
@@ -78,6 +109,15 @@ export class TranscodeManager {
     await this.pruneCache();
     this.availableEncoders = await this.probeEncoders();
     this.encoder = this.availableEncoders[0];
+    this.startLeaseSweeper();
+  }
+
+  private startLeaseSweeper() {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => {
+      void this.sweepExpiredJobs().catch(() => undefined);
+    }, TRANSCODE_IDLE_SWEEP_INTERVAL_MS);
+    this.sweepTimer.unref();
   }
 
   private async probeEncoders() {
@@ -106,7 +146,8 @@ export class TranscodeManager {
     return available;
   }
 
-  decideMode(item: MediaItem): TranscodeMode {
+  decideMode(item: MediaItem, superResolution: ServerSuperResolutionLevel = 'off'): TranscodeMode {
+    if (item.kind === 'video' && superResolution !== 'off') return 'transcode';
     const h264 = item.videoCodec === 'h264'
       && item.pixelFormat === 'yuv420p'
       && (!item.videoProfile || ['Constrained Baseline', 'Baseline', 'Main', 'High'].includes(item.videoProfile))
@@ -117,23 +158,47 @@ export class TranscodeManager {
     return 'transcode';
   }
 
-  private jobKey(item: MediaItem, mode: TranscodeMode) {
+  private jobKey(item: MediaItem, mode: TranscodeMode, superResolution: ServerSuperResolutionLevel) {
     return createHash('sha256')
-      .update([TRANSCODE_CACHE_SCHEMA, item.id, item.size, item.modifiedAt, mode, mode === 'transcode' ? this.encoder : 'copy'].join('|'))
+      .update([
+        TRANSCODE_CACHE_SCHEMA,
+        item.id,
+        item.size,
+        item.modifiedAt,
+        mode,
+        superResolution,
+        item.projection,
+        item.stereo,
+        item.sampleAspectRatio || '1:1',
+        mode === 'transcode' ? this.encoder : 'copy',
+      ].join('|'))
       .digest('hex')
       .slice(0, 32);
   }
 
-  async ensure(item: MediaItem): Promise<TranscodeJob> {
+  async ensure(item: MediaItem, requestedSuperResolution: ServerSuperResolutionLevel = 'off'): Promise<TranscodeJob> {
+    const superResolution = item.kind === 'video' ? requestedSuperResolution : 'off';
+    const requestedPlan = serverSuperResolutionPlan(item, superResolution);
+    if (superResolution !== 'off' && !requestedPlan.available) {
+      throw new ServerSuperResolutionUnavailableError(requestedPlan.reason || '无法安全生成电脑端超分流。');
+    }
     const current = await stat(item.path);
-    if (current.size !== item.size || current.mtime.toISOString() !== item.modifiedAt) {
+    if (item.sourceType === 'local' && (current.size !== item.size || current.mtime.toISOString() !== item.modifiedAt)) {
       throw new SourceChangedError('源文件在媒体扫描后发生了变化');
     }
-    const mode = this.decideMode(item);
-    const key = this.jobKey(item, mode);
+    if (item.sourceType !== 'local' && item.size > 0 && current.size !== item.size) {
+      throw new SourceChangedError('云盘缓存文件不完整，请重新缓存');
+    }
+    const mode = this.decideMode(item, superResolution);
+    const key = this.jobKey(item, mode, superResolution);
+    // A viewer may return while the idle sweeper is still terminating the
+    // previous process and deleting this cache directory. Wait for that
+    // cancellation so the replacement cannot race the old cleanup.
+    const cancellation = this.cancellationPromises.get(key);
+    if (cancellation) await cancellation;
     const known = this.jobs.get(key);
     if (known && known.state !== 'failed') {
-      known.lastAccessAt = Date.now();
+      this.touchJob(known);
       return known;
     }
     if (known?.state === 'failed' && Date.now() - (known.failedAt ?? Date.now()) < 5_000) return known;
@@ -141,7 +206,7 @@ export class TranscodeManager {
     const pending = this.inflight.get(key);
     if (pending) return pending;
 
-    const operation = this.prepare(item, mode, key);
+    const operation = this.prepare(item, mode, superResolution, key);
     this.inflight.set(key, operation);
     try {
       return await operation;
@@ -150,17 +215,20 @@ export class TranscodeManager {
     }
   }
 
-  private async prepare(item: MediaItem, mode: TranscodeMode, key: string): Promise<TranscodeJob> {
+  private async prepare(item: MediaItem, mode: TranscodeMode, superResolution: ServerSuperResolutionLevel, key: string): Promise<TranscodeJob> {
     const directory = path.join(this.config.cacheDir, 'hls', key);
     const playlistPath = path.join(directory, 'index.m3u8');
     await mkdir(directory, { recursive: true });
     if (await exists(playlistPath)) {
       const playlist = await readFile(playlistPath, 'utf8');
       if (await completePlaylist(directory, playlist)) {
+        const now = Date.now();
         const cached: TranscodeJob = {
-          key, itemId: item.id, directory, playlistPath, mode,
+          key, itemId: item.id, directory, playlistPath, mode, superResolution,
+          superResolutionPlan: serverSuperResolutionPlan(item, superResolution),
           encoder: mode === 'transcode' ? this.encoder : 'copy',
-          state: 'ready', progressSeconds: item.duration, startedAt: new Date().toISOString(), lastAccessAt: Date.now(),
+          state: 'ready', progressSeconds: item.duration, startedAt: new Date().toISOString(),
+          lastAccessAt: now, leaseExpiresAt: now + TRANSCODE_ACTIVITY_LEASE_MS,
         };
         this.jobs.set(key, cached);
         return cached;
@@ -170,25 +238,37 @@ export class TranscodeManager {
     await rm(directory, { recursive: true, force: true });
     await mkdir(directory, { recursive: true });
 
+    // Reclaim abandoned work globally, but only under actual capacity
+    // pressure and only after its activity lease has expired. This handles a
+    // user leaving the page or switching back to direct play without killing
+    // another headset whose playlist or segments are still being requested.
+    await this.reclaimExpiredJobsForCapacity();
+
     const activeCount = [...this.jobs.values()].filter((job) => job.state === 'running' || job.state === 'preparing').length;
     if (activeCount >= this.config.maxTranscodes) throw new TranscodeCapacityError('当前已有转码任务，请稍后重试');
 
+    const now = Date.now();
     const job: TranscodeJob = {
-      key, itemId: item.id, directory, playlistPath, mode,
+      key, itemId: item.id, directory, playlistPath, mode, superResolution,
+      superResolutionPlan: serverSuperResolutionPlan(item, superResolution),
       encoder: mode === 'transcode' ? this.encoder : 'copy',
-      state: 'preparing', progressSeconds: 0, startedAt: new Date().toISOString(), lastAccessAt: Date.now(),
+      state: 'preparing', progressSeconds: 0, startedAt: new Date().toISOString(),
+      lastAccessAt: now, leaseExpiresAt: now + TRANSCODE_ACTIVITY_LEASE_MS,
     };
     this.jobs.set(key, job);
     this.launch(job, item);
     return job;
   }
 
-  private encoderArgs(encoder: string): string[] {
+  private encoderArgs(encoder: string, superResolution: ServerSuperResolutionLevel = 'off'): string[] {
+    const profile = SERVER_SUPER_RESOLUTION_PROFILES[superResolution];
     if (encoder === 'h264_nvenc') {
-      return ['-c:v', encoder, '-preset', 'p4', '-tune', 'hq', '-rc', 'vbr', '-cq', '21', '-b:v', '0', '-maxrate:v', '24M', '-bufsize:v', '48M', '-spatial_aq', '1', '-forced-idr', '1', '-profile:v', 'high'];
+      const preset = superResolution === 'ultra' ? 'p6' : superResolution === 'high' ? 'p5' : 'p4';
+      return ['-c:v', encoder, '-preset', preset, '-tune', 'hq', '-rc', 'vbr', '-cq', String(profile.nvencCq), '-b:v', '0', '-maxrate:v', profile.maxRate, '-bufsize:v', profile.maxRate, '-spatial_aq', '1', '-forced-idr', '1', '-profile:v', 'high', '-level:v', '5.2'];
     }
-    if (encoder === 'h264_mf') return ['-c:v', encoder, '-rate_control', 'quality', '-quality', '75'];
-    return ['-c:v', encoder, '-preset', 'veryfast', '-crf', '21', '-maxrate:v', '24M', '-bufsize:v', '48M', '-profile:v', 'high'];
+    if (encoder === 'h264_mf') return ['-c:v', encoder, '-rate_control', 'quality', '-quality', '75', '-level:v', '5.2'];
+    const preset = superResolution === 'ultra' ? 'medium' : superResolution === 'high' ? 'fast' : 'veryfast';
+    return ['-c:v', encoder, '-preset', preset, '-crf', String(profile.nvencCq), '-maxrate:v', profile.maxRate, '-bufsize:v', profile.maxRate, '-profile:v', 'high', '-level:v', '5.2'];
   }
 
   private buildArgs(job: TranscodeJob, item: MediaItem) {
@@ -199,30 +279,28 @@ export class TranscodeManager {
       '-i', item.path,
     ];
 
-    if (item.kind === 'video') args.push('-map', '0:v:0', '-map', '0:a:0?');
+    const pixelFormat = job.encoder === 'h264_mf' ? 'nv12' : 'yuv420p';
+    const pipeline = item.kind === 'video' && job.mode === 'transcode'
+      ? buildVideoPipeline(item, job.superResolution, pixelFormat)
+      : undefined;
+    if (item.kind === 'video' && pipeline?.filterComplex && pipeline.outputLabel) {
+      args.push('-filter_complex', pipeline.filterComplex, '-map', pipeline.outputLabel, '-map', '0:a:0?');
+    } else if (item.kind === 'video') args.push('-map', '0:v:0', '-map', '0:a:0?');
     else args.push('-map', '0:a:0');
     args.push('-sn', '-dn');
 
     if (item.kind === 'video') {
       if (job.mode === 'remux' || job.mode === 'audio-transcode') args.push('-c:v', 'copy');
       else {
-        const sourceFps = Math.max(1, item.frameRate || 30);
-        const fps = Math.min(60, sourceFps);
-        const gop = Math.round(fps * 2);
-        const pixelFormat = job.encoder === 'h264_mf' ? 'nv12' : 'yuv420p';
-        const filters = [
-          "scale=w='max(2,trunc(if(gte(iw*sar,ih),min(3840,iw*sar),min(3840,ih)*iw*sar/ih)/2)*2)':h='max(2,trunc(if(gte(iw*sar,ih),min(3840,iw*sar)*ih/(iw*sar),min(3840,ih))/2)*2)':flags=bicubic",
-          'setsar=1',
-          ...(sourceFps > 60 ? [`fps=${fps}`] : []),
-          `format=${pixelFormat}`,
-        ];
+        const activePipeline = pipeline!;
+        const gop = Math.round(activePipeline.fps * 2);
         args.push(
-          '-vf', filters.join(','),
           '-g', String(gop), '-keyint_min', String(gop),
           '-force_key_frames', 'expr:gte(t,n_forced*2)',
         );
+        if (activePipeline.filters) args.push('-vf', activePipeline.filters.join(','));
         if (job.encoder !== 'h264_mf') args.push('-sc_threshold', '0');
-        args.push(...this.encoderArgs(job.encoder));
+        args.push(...this.encoderArgs(job.encoder, job.superResolution));
       }
     }
 
@@ -238,6 +316,7 @@ export class TranscodeManager {
   }
 
   private launch(job: TranscodeJob, item: MediaItem) {
+    if (job.cancelled) return;
     job.state = 'running';
     const child = spawn(this.config.ffmpegPath, this.buildArgs(job, item), {
       windowsHide: true,
@@ -259,7 +338,7 @@ export class TranscodeManager {
     });
     child.stderr.on('data', (chunk: Buffer) => { stderr = `${stderr}${chunk}`.slice(-16_384); });
     const fail = (message: string) => {
-      if (settled) return;
+      if (settled || job.cancelled) return;
       settled = true;
       job.process = undefined;
       const currentIndex = this.availableEncoders.indexOf(job.encoder);
@@ -271,6 +350,7 @@ export class TranscodeManager {
         void rm(job.directory, { recursive: true, force: true })
           .then(() => mkdir(job.directory, { recursive: true }))
           .then(() => {
+            if (job.cancelled) return;
             job.encoder = nextEncoder;
             job.error = undefined;
             this.launch(job, item);
@@ -293,6 +373,7 @@ export class TranscodeManager {
       if (settled) return;
       settled = true;
       job.process = undefined;
+      if (job.cancelled) return;
       if (code === 0) {
         job.state = 'ready';
         job.progressSeconds = item.duration;
@@ -302,6 +383,75 @@ export class TranscodeManager {
         fail(stderr.trim() || `FFmpeg exited with code ${code}`);
       }
     });
+  }
+
+  private cancelJob(job: TranscodeJob) {
+    const existing = this.cancellationPromises.get(job.key);
+    if (existing) return existing;
+    const operation = this.performCancelJob(job);
+    const tracked = operation.finally(() => {
+      if (this.cancellationPromises.get(job.key) === tracked) this.cancellationPromises.delete(job.key);
+    });
+    this.cancellationPromises.set(job.key, tracked);
+    return tracked;
+  }
+
+  private async performCancelJob(job: TranscodeJob) {
+    job.cancelled = true;
+    const child = job.process;
+    if (child) {
+      await new Promise<void>((resolve) => {
+        let finished = false;
+        const done = () => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(done, 2_000);
+        child.once('close', done);
+        child.kill();
+      });
+    }
+    this.jobs.delete(job.key);
+    await rm(job.directory, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  async sweepExpiredJobs() {
+    if (this.sweepPromise) return this.sweepPromise;
+    const operation = (async () => {
+      const now = Date.now();
+      const expired = [...this.jobs.values()]
+        .filter((job) => (job.state === 'running' || job.state === 'preparing') && !this.hasActiveLease(job, now))
+        .sort((left, right) => (left.leaseExpiresAt ?? left.lastAccessAt) - (right.leaseExpiresAt ?? right.lastAccessAt));
+      for (const job of expired) {
+        // A playlist/segment request can renew a shared stream after the
+        // snapshot above. Recheck immediately before cancellation.
+        if (this.jobs.get(job.key) !== job || this.hasActiveLease(job)) continue;
+        await this.cancelJob(job);
+      }
+    })();
+    this.sweepPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.sweepPromise === operation) this.sweepPromise = undefined;
+    }
+  }
+
+  private async reclaimExpiredJobsForCapacity() {
+    let activeCount = [...this.jobs.values()].filter((job) => job.state === 'running' || job.state === 'preparing').length;
+    if (activeCount < this.config.maxTranscodes) return;
+    const now = Date.now();
+    const expired = [...this.jobs.values()]
+      .filter((job) => (job.state === 'running' || job.state === 'preparing') && !this.hasActiveLease(job, now))
+      .sort((left, right) => (left.leaseExpiresAt ?? left.lastAccessAt) - (right.leaseExpiresAt ?? right.lastAccessAt));
+    for (const job of expired) {
+      if (this.jobs.get(job.key) !== job || this.hasActiveLease(job)) continue;
+      await this.cancelJob(job);
+      activeCount = [...this.jobs.values()].filter((candidate) => candidate.state === 'running' || candidate.state === 'preparing').length;
+      if (activeCount < this.config.maxTranscodes) return;
+    }
   }
 
   async waitForPlaylist(job: TranscodeJob, timeoutMs = 20_000) {
@@ -316,7 +466,7 @@ export class TranscodeManager {
 
   resolveAsset(job: TranscodeJob, fileName: string) {
     if (!/^(index\.m3u8|init\.mp4|seg_\d{6}\.m4s)$/.test(fileName)) return undefined;
-    job.lastAccessAt = Date.now();
+    this.touchJob(job);
     return path.join(job.directory, fileName);
   }
 
@@ -345,19 +495,39 @@ export class TranscodeManager {
     return this.prunePromise;
   }
 
-  statusForItem(item: MediaItem) {
-    const mode = this.decideMode(item);
-    const key = this.jobKey(item, mode);
+  statusForItem(item: MediaItem, requestedSuperResolution: ServerSuperResolutionLevel = 'off') {
+    const superResolution = item.kind === 'video' ? requestedSuperResolution : 'off';
+    const mode = this.decideMode(item, superResolution);
+    const key = this.jobKey(item, mode, superResolution);
     const job = this.jobs.get(key);
-    return job ? { state: job.state, mode: job.mode, encoder: job.encoder, progressSeconds: job.progressSeconds, error: job.error } : { state: 'idle', mode, encoder: mode === 'transcode' ? this.encoder : 'copy', progressSeconds: 0 };
+    const plan = job?.superResolutionPlan ?? serverSuperResolutionPlan(item, superResolution);
+    return job
+      ? { state: job.state, mode: job.mode, encoder: job.encoder, progressSeconds: job.progressSeconds, error: job.error, superResolution, plan }
+      : {
+          state: superResolution !== 'off' && !plan.available ? 'unavailable' : 'idle',
+          mode,
+          encoder: mode === 'transcode' ? this.encoder : 'copy',
+          progressSeconds: 0,
+          error: plan.reason,
+          superResolution,
+          plan,
+        };
   }
 
-  jobForItem(item: MediaItem) {
-    const mode = this.decideMode(item);
-    return this.jobs.get(this.jobKey(item, mode));
+  jobForItem(item: MediaItem, requestedSuperResolution: ServerSuperResolutionLevel = 'off') {
+    const superResolution = item.kind === 'video' ? requestedSuperResolution : 'off';
+    const mode = this.decideMode(item, superResolution);
+    return this.jobs.get(this.jobKey(item, mode, superResolution));
   }
 
   shutdown() {
-    for (const job of this.jobs.values()) job.process?.kill();
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = undefined;
+    }
+    for (const job of this.jobs.values()) {
+      job.cancelled = true;
+      job.process?.kill();
+    }
   }
 }

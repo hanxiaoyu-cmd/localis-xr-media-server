@@ -1,6 +1,7 @@
 import { createReadStream } from 'node:fs';
 import { access, open } from 'node:fs/promises';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { getLanAddresses, saveMediaDirs } from './config';
@@ -10,7 +11,9 @@ import { MediaDirectoryValidationError, MediaLibrary } from './media-library';
 import { ProgressStore } from './progress-store';
 import { parseByteRange, RangeNotSatisfiableError } from './range';
 import { getSubtitleVtt } from './subtitles';
-import { SourceChangedError, TranscodeCapacityError, TranscodeManager } from './transcode-manager';
+import { SourceChangedError, TranscodeCapacityError, TranscodeManager, type TranscodeJob } from './transcode-manager';
+import { parseServerSuperResolutionLevel, SERVER_SUPER_RESOLUTION_LEVELS, ServerSuperResolutionUnavailableError } from './super-resolution';
+import { CloudSourceError, CloudSourceManager } from './cloud-source-manager';
 import type { LocalisConfig } from './types';
 
 export interface AppDependencies {
@@ -19,6 +22,7 @@ export interface AppDependencies {
   auth: PairingAuth;
   progress: ProgressStore;
   transcodes: TranscodeManager;
+  clouds?: CloudSourceManager;
   pickDirectory?: () => Promise<string | undefined>;
 }
 
@@ -100,7 +104,7 @@ async function sendFileWithRange(req: Request, res: Response, filePath: string, 
 }
 
 export function createApiApp(deps: AppDependencies) {
-  const { config, library, auth, progress, transcodes } = deps;
+  const { config, library, auth, progress, transcodes, clouds } = deps;
   const selectDirectory = deps.pickDirectory ?? (() => pickLocalDirectory(config.mediaDirs[0]));
   const app = express();
   app.disable('x-powered-by');
@@ -161,6 +165,8 @@ export function createApiApp(deps: AppDependencies) {
       libraryCount: config.mediaDirs.length,
       canPickLocalFolder: isLoopbackAddress(req.socket.remoteAddress),
       nativeFolderPicker: ['win32', 'darwin', 'linux'].includes(process.platform),
+      canManageCloud: isLoopbackAddress(req.socket.remoteAddress),
+      cloudSourceCount: clouds?.summaries().length ?? 0,
       lanUrls: req.secure
         ? config.publicHostname ? [`https://${config.publicHostname}:${config.port}`] : []
         : lanAddresses.map((address) => `${protocol}://${address}:${config.port}`),
@@ -202,6 +208,79 @@ export function createApiApp(deps: AppDependencies) {
     } catch (error) { next(error); }
   });
 
+  const requireLocalCloudManagement = (req: Request, res: Response) => {
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      res.status(403).json({ error: 'local_management_required', message: '请在运行 Localis 的电脑上连接或管理云盘。' });
+      return false;
+    }
+    if (!clouds) {
+      res.status(503).json({ error: 'cloud_manager_unavailable', message: '云盘管理器尚未启动。' });
+      return false;
+    }
+    return true;
+  };
+
+  app.get('/api/cloud/sources', (req, res) => {
+    if (!requireLocalCloudManagement(req, res)) return;
+    res.json({ sources: clouds!.summaries() });
+  });
+  app.post('/api/cloud/webdav', async (req, res, next) => {
+    try {
+      if (!requireLocalCloudManagement(req, res)) return;
+      const source = await clouds!.connectWebDav({
+        provider: req.body?.provider,
+        name: String(req.body?.name || ''),
+        baseUrl: String(req.body?.baseUrl || ''),
+        rootPath: String(req.body?.rootPath || ''),
+        username: String(req.body?.username || ''),
+        password: String(req.body?.password || ''),
+      });
+      await library.scan();
+      res.status(201).json({ source, items: library.list() });
+    } catch (error) { next(error); }
+  });
+  app.post('/api/cloud/baidu/device', async (req, res, next) => {
+    try {
+      if (!requireLocalCloudManagement(req, res)) return;
+      res.status(201).json(await clouds!.startBaiduAuthorization({
+        name: String(req.body?.name || ''),
+        appFolder: String(req.body?.appFolder || ''),
+        appKey: String(req.body?.appKey || ''),
+        secretKey: String(req.body?.secretKey || ''),
+      }));
+    } catch (error) { next(error); }
+  });
+  app.get('/api/cloud/baidu/device/:session', async (req, res, next) => {
+    try {
+      if (!requireLocalCloudManagement(req, res)) return;
+      const result = await clouds!.pollBaiduAuthorization(String(req.params.session));
+      if (result.state === 'authorized') await library.scan();
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+  app.delete('/api/cloud/baidu/device/:session', (req, res, next) => {
+    try {
+      if (!requireLocalCloudManagement(req, res)) return;
+      clouds!.cancelBaiduAuthorization(String(req.params.session));
+      res.status(204).end();
+    } catch (error) { next(error); }
+  });
+  app.post('/api/cloud/refresh', async (req, res, next) => {
+    try {
+      if (!requireLocalCloudManagement(req, res)) return;
+      await library.refreshClouds();
+      res.json({ sources: clouds!.summaries(), items: library.list() });
+    } catch (error) { next(error); }
+  });
+  app.delete('/api/cloud/sources/:id', async (req, res, next) => {
+    try {
+      if (!requireLocalCloudManagement(req, res)) return;
+      await clouds!.removeSource(String(req.params.id));
+      await library.scan();
+      res.status(204).end();
+    } catch (error) { next(error); }
+  });
+
   app.get('/api/media/:id', (req, res) => {
     const item = library.list().find((candidate) => candidate.id === req.params.id);
     if (!item) return res.status(404).json({ error: 'media_not_found' });
@@ -229,7 +308,40 @@ export function createApiApp(deps: AppDependencies) {
       const item = library.get(String(req.params.id));
       if (!item) return res.status(404).json({ error: 'media_not_found' });
       res.set('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(item.fileName)}`);
-      await sendFileWithRange(req, res, item.path, mimeFor(item.path));
+      if (item.sourceType === 'local') {
+        await sendFileWithRange(req, res, item.path, mimeFor(item.path));
+      } else {
+        if (!clouds || !item.remoteFileId) throw new CloudSourceError('cloud_file_not_found', '云盘文件暂时不可用。', 404);
+        if (req.method === 'HEAD') {
+          res.status(200).set({
+            'Accept-Ranges': 'bytes',
+            'Content-Type': mimeFor(item.fileName),
+            'Content-Length': String(item.size),
+            'Last-Modified': item.modifiedAt,
+            'Cache-Control': 'private, max-age=0, must-revalidate',
+          }).end();
+          return;
+        }
+        const upstream = await clouds.openFile(item.remoteFileId, {
+          range: typeof req.headers.range === 'string' ? req.headers.range : undefined,
+          ifRange: typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined,
+        });
+        if (![200, 206, 416].includes(upstream.status)) {
+          await upstream.body?.cancel();
+          throw new CloudSourceError('cloud_stream_failed', `云盘读取返回 HTTP ${upstream.status}`, 502);
+        }
+        res.status(upstream.status);
+        for (const header of ['accept-ranges', 'cache-control', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified']) {
+          const value = upstream.headers.get(header);
+          if (value) res.set(header, value);
+        }
+        if (!upstream.headers.get('content-type')) res.set('Content-Type', mimeFor(item.fileName));
+        res.set('Cache-Control', 'private, max-age=0, must-revalidate');
+        if (req.method === 'HEAD' || !upstream.body) {
+          await upstream.body?.cancel();
+          res.end();
+        } else await pipeline(Readable.fromWeb(upstream.body as never), res);
+      }
     } catch (error) {
       // Browsers routinely cancel speculative/range media requests while they
       // seek or switch sources. pipeline() still closes the source handle; no
@@ -263,37 +375,84 @@ export function createApiApp(deps: AppDependencies) {
     } catch (error) { next(error); }
   });
 
-  app.get('/api/media/:id/hls/status', (req, res) => {
-    const item = library.get(req.params.id);
+  const requestedSuperResolution = (req: Request, res: Response) => {
+    const raw = req.params.level;
+    if (raw !== undefined && !SERVER_SUPER_RESOLUTION_LEVELS.has(raw as never)) {
+      res.status(400).json({ error: 'invalid_super_resolution_level', message: '超分档位必须是 off、standard、high 或 ultra。' });
+      return undefined;
+    }
+    return parseServerSuperResolutionLevel(raw);
+  };
+  const hlsStatus = (req: Request, res: Response) => {
+    const item = library.get(String(req.params.id));
     if (!item) return res.status(404).json({ error: 'media_not_found' });
-    res.json(transcodes.statusForItem(item));
-  });
-  app.get('/api/media/:id/hls/:file', async (req, res, next) => {
+    const level = requestedSuperResolution(req, res);
+    if (!level) return;
+    res.json(transcodes.statusForItem(item, level));
+  };
+  const hlsAsset = async (req: Request, res: Response, next: NextFunction) => {
     try {
-      let item = library.get(req.params.id);
+      let item = library.get(String(req.params.id));
       if (!item) return res.status(404).json({ error: 'media_not_found' });
+      const level = requestedSuperResolution(req, res);
+      if (!level) return;
       // Reject malformed asset names before creating an expensive FFmpeg job.
       // Express decodes route params, so this also covers encoded traversal forms.
-      if (!/^(index\.m3u8|init\.mp4|seg_\d{6}\.m4s)$/.test(req.params.file)) {
+      if (!/^(index\.m3u8|init\.mp4|seg_\d{6}\.m4s)$/.test(String(req.params.file))) {
         return res.status(404).json({ error: 'hls_asset_not_found' });
       }
-      let job;
+      let job: TranscodeJob | undefined;
+      let releaseCloudLease: (() => void) | undefined;
       if (req.params.file === 'index.m3u8') {
-        try {
-          job = await transcodes.ensure(item);
-        } catch (error) {
-          if (!(error instanceof SourceChangedError)) throw error;
-          await library.scan();
-          item = library.get(req.params.id);
-          if (!item) return res.status(404).json({ error: 'media_not_found' });
-          job = await transcodes.ensure(item);
+        if (item.sourceType !== 'local') {
+          if (!clouds) throw new CloudSourceError('cloud_manager_unavailable', '云盘管理器尚未启动。', 503);
+          const cacheJob = clouds.ensureCached(item);
+          if (cacheJob.state === 'failed') throw new CloudSourceError(cacheJob.errorCode || 'cloud_cache_failed', cacheJob.error || '云盘缓存失败。', cacheJob.errorStatus || 502);
+          if (cacheJob.state !== 'ready') {
+            return res.status(202).set('Retry-After', '1').json({
+              state: cacheJob.state,
+              stage: 'cloud-cache',
+              progressBytes: cacheJob.progressBytes,
+              totalBytes: cacheJob.totalBytes,
+            });
+          }
+          releaseCloudLease = clouds.acquireCacheLease(cacheJob.path);
+          try { item = await clouds.localizedItem(item, cacheJob); } catch (error) {
+            releaseCloudLease();
+            throw error;
+          }
         }
-      } else job = transcodes.jobForItem(item);
+        try {
+          job = await transcodes.ensure(item, level);
+        } catch (error) {
+          if (!(error instanceof SourceChangedError) || item.sourceType !== 'local') throw error;
+          await library.scan();
+          item = library.get(String(req.params.id));
+          if (!item) return res.status(404).json({ error: 'media_not_found' });
+          job = await transcodes.ensure(item, level);
+        } finally {
+          if (releaseCloudLease) {
+            if (job && (job.state === 'running' || job.state === 'preparing')) {
+              const leaseTimer = setInterval(() => {
+                if (job && job.state !== 'running' && job.state !== 'preparing') {
+                  clearInterval(leaseTimer);
+                  releaseCloudLease?.();
+                  releaseCloudLease = undefined;
+                }
+              }, 1_000);
+              leaseTimer.unref();
+            } else {
+              releaseCloudLease();
+              releaseCloudLease = undefined;
+            }
+          }
+        }
+      } else job = transcodes.jobForItem(item, level);
       if (!job) return res.status(404).json({ error: 'hls_asset_not_ready' });
       if (req.params.file === 'index.m3u8' && !await transcodes.waitForPlaylist(job, 5_000)) {
-        return res.status(202).set('Retry-After', '1').json({ state: job.state });
+        return res.status(202).set('Retry-After', '1').json({ state: job.state, stage: 'transcode', progressSeconds: job.progressSeconds });
       }
-      const asset = transcodes.resolveAsset(job, req.params.file);
+      const asset = transcodes.resolveAsset(job, String(req.params.file));
       if (!asset) return res.status(404).json({ error: 'hls_asset_not_found' });
       try { await access(asset); } catch { return res.status(404).json({ error: 'hls_asset_not_ready' }); }
       res.set({
@@ -306,7 +465,12 @@ export function createApiApp(deps: AppDependencies) {
       });
       pipeFile(res, asset, next);
     } catch (error) { next(error); }
-  });
+  };
+  app.get('/api/media/:id/hls/:level/status', hlsStatus);
+  app.get('/api/media/:id/hls/:level/:file', hlsAsset);
+  // Legacy URLs remain available as the non-enhanced compatibility stream.
+  app.get('/api/media/:id/hls/status', hlsStatus);
+  app.get('/api/media/:id/hls/:file', hlsAsset);
 
   app.put('/api/progress/:id', async (req, res, next) => {
     try {
@@ -328,8 +492,14 @@ export function createApiApp(deps: AppDependencies) {
     if (error instanceof MediaDirectoryValidationError) {
       return res.status(400).json({ error: 'invalid_media_directory', message: error.message });
     }
+    if (error instanceof CloudSourceError) {
+      return res.status(error.status).json({ error: error.code, message: error.message });
+    }
     if (error instanceof TranscodeCapacityError) {
       return res.status(503).set('Retry-After', '1').json({ error: 'transcode_capacity', message: error.message });
+    }
+    if (error instanceof ServerSuperResolutionUnavailableError) {
+      return res.status(422).json({ error: 'super_resolution_unavailable', message: error.message });
     }
     const message = error instanceof Error ? error.message : 'unknown_error';
     console.error('[Localis API]', error);

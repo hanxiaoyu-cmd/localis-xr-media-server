@@ -19,6 +19,29 @@ interface ServerInfo {
   publicUrl?: string;
   canPickLocalFolder: boolean;
   nativeFolderPicker: boolean;
+  canManageCloud: boolean;
+  cloudSourceCount: number;
+}
+
+interface CloudSourceSummary {
+  id: string;
+  provider: 'quark' | 'baidu';
+  name: string;
+  connection: 'OpenList WebDAV' | '百度官方 API';
+  rootPath: string;
+  endpoint?: string;
+  fileCount: number;
+  lastScanAt?: string;
+  error?: string;
+}
+
+interface BaiduAuthorization {
+  sessionId: string;
+  userCode: string;
+  verificationUrl: string;
+  qrCodeDataUrl: string;
+  expiresAt: string;
+  intervalSeconds: number;
 }
 
 const posterTones = ['violet', 'ocean', 'ember', 'mint', 'gold', 'rose'];
@@ -72,6 +95,15 @@ export function MediaLibraryView() {
   const [folderPath, setFolderPath] = useState('');
   const [folderBusy, setFolderBusy] = useState(false);
   const [folderError, setFolderError] = useState('');
+  const [cloudOpen, setCloudOpen] = useState(false);
+  const [cloudProvider, setCloudProvider] = useState<'quark' | 'baidu'>('quark');
+  const [baiduConnection, setBaiduConnection] = useState<'official' | 'webdav'>('official');
+  const [cloudSources, setCloudSources] = useState<CloudSourceSummary[]>([]);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudError, setCloudError] = useState('');
+  const [webDav, setWebDav] = useState({ baseUrl: 'http://127.0.0.1:5244/dav/', rootPath: '/Quark', username: 'localis-reader', password: '' });
+  const [baiduApp, setBaiduApp] = useState({ appKey: '', secretKey: '', appFolder: 'Localis' });
+  const [baiduAuthorization, setBaiduAuthorization] = useState<BaiduAuthorization>();
 
   const loadLibrary = async () => {
     setLoading(true);
@@ -171,6 +203,152 @@ export function MediaLibraryView() {
     }
   };
 
+  const refreshLibrary = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      await jsonFetch('/api/library/refresh', { method: 'POST', body: '{}' });
+      await loadLibrary();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '刷新媒体库失败');
+      setLoading(false);
+    }
+  };
+
+  const loadCloudSources = async () => {
+    try {
+      const result = await jsonFetch<{ sources: CloudSourceSummary[] }>('/api/cloud/sources');
+      setCloudSources(result.sources);
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : '无法读取云盘连接');
+    }
+  };
+
+  const openCloudManager = () => {
+    setCloudError('');
+    setCloudOpen(true);
+    void loadCloudSources();
+  };
+
+  const connectWebDav = async (event: FormEvent) => {
+    event.preventDefault();
+    setCloudBusy(true);
+    setCloudError('');
+    try {
+      await jsonFetch('/api/cloud/webdav', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: cloudProvider,
+          name: cloudProvider === 'quark' ? '夸克网盘' : '百度网盘 · OpenList',
+          ...webDav,
+        }),
+      });
+      setWebDav((current) => ({ ...current, password: '' }));
+      await Promise.all([loadCloudSources(), loadLibrary()]);
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : '连接 OpenList 失败');
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const startBaiduAuthorization = async (event: FormEvent) => {
+    event.preventDefault();
+    setCloudBusy(true);
+    setCloudError('');
+    try {
+      const authorization = await jsonFetch<BaiduAuthorization>('/api/cloud/baidu/device', {
+        method: 'POST',
+        body: JSON.stringify({ name: '百度网盘', ...baiduApp }),
+      });
+      setBaiduAuthorization(authorization);
+      setBaiduApp((current) => ({ ...current, secretKey: '' }));
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : '无法开始百度授权');
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!baiduAuthorization) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    let transientFailures = 0;
+    const schedule = (seconds: number) => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { if (!cancelled) void poll(); }, Math.max(1, seconds) * 1000);
+    };
+    const poll = async () => {
+      try {
+        const result = await jsonFetch<{ state: 'pending' | 'authorized'; retryAfterSeconds?: number }>(`/api/cloud/baidu/device/${baiduAuthorization.sessionId}`);
+        if (cancelled) return;
+        transientFailures = 0;
+        if (result.state === 'authorized') {
+          setBaiduAuthorization(undefined);
+          await Promise.all([loadCloudSources(), loadLibrary()]);
+          return;
+        }
+        schedule(Math.max(5, result.retryAfterSeconds || baiduAuthorization.intervalSeconds));
+      } catch (cause) {
+        if (cancelled) return;
+        const status = (cause as { status?: number }).status;
+        const message = cause instanceof Error ? cause.message : '百度授权轮询失败';
+        if (status === 403 || status === 404 || status === 410) {
+          setBaiduAuthorization(undefined);
+          setCloudError(message);
+          return;
+        }
+        transientFailures += 1;
+        setCloudError(`${message}；网络恢复后会自动重试。`);
+        schedule(Math.min(30, 5 * 2 ** Math.min(3, transientFailures - 1)));
+      }
+    };
+    schedule(baiduAuthorization.intervalSeconds);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [baiduAuthorization]);
+
+  const cancelBaiduLink = async () => {
+    const authorization = baiduAuthorization;
+    if (!authorization) return;
+    setBaiduAuthorization(undefined);
+    setCloudError('');
+    try {
+      await jsonFetch(`/api/cloud/baidu/device/${authorization.sessionId}`, { method: 'DELETE' });
+    } catch (cause) {
+      if ((cause as { status?: number }).status !== 404) setCloudError(cause instanceof Error ? cause.message : '无法取消百度授权');
+    }
+  };
+
+  const removeCloudSource = async (id: string) => {
+    setCloudBusy(true);
+    setCloudError('');
+    try {
+      await jsonFetch(`/api/cloud/sources/${id}`, { method: 'DELETE' });
+      await Promise.all([loadCloudSources(), loadLibrary()]);
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : '移除云盘失败');
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const refreshCloudSources = async () => {
+    setCloudBusy(true);
+    setCloudError('');
+    try {
+      await jsonFetch('/api/cloud/refresh', { method: 'POST', body: '{}' });
+      await Promise.all([loadCloudSources(), loadLibrary()]);
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : '刷新云盘失败');
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
   if (needsPairing) {
     return (
       <main className="pairing-page">
@@ -206,7 +384,7 @@ export function MediaLibraryView() {
           <strong>{server?.publicUrl || server?.lanUrls[0]?.replace(/^https?:\/\//, '') || '正在检测…'}</strong>
           <small>{server?.secure ? '可信 HTTPS · WebXR 可用' : 'HTTP · 仅桌面测试 WebXR'}</small>
         </div>
-        <button className="nav-item" onClick={() => void loadLibrary()}><span>↻</span>刷新媒体库</button>
+        <button className="nav-item" onClick={() => void refreshLibrary()}><span>↻</span>刷新媒体库</button>
       </aside>
 
       <section className="content" id="library">
@@ -216,14 +394,17 @@ export function MediaLibraryView() {
           <button className="avatar" aria-label="Localis 服务状态">L</button>
         </header>
 
-        {!server?.secure && typeof window !== 'undefined' && !['localhost', '127.0.0.1'].includes(window.location.hostname) && (
+        {server && !server.secure && typeof window !== 'undefined' && !['localhost', '127.0.0.1'].includes(window.location.hostname) && (
           <div className="security-banner"><strong>普通播放可用</strong><span>当前地址不是可信 HTTPS，浏览器会禁用 WebXR。请使用 Localis 提供的可信域名。</span></div>
         )}
         {error && <div className="inline-error library-error" role="alert">{error}<button onClick={() => setError('')}>关闭</button></div>}
 
         <div className="page-heading">
           <div><p className="eyebrow">YOUR PRIVATE CINEMA</p><h1>晚上好，继续探索。</h1></div>
-          {server?.canPickLocalFolder && <button className="add-button" onClick={() => { setFolderError(''); setFolderOpen(true); }}><span className="folder-icon" aria-hidden="true" />添加媒体文件夹</button>}
+          {(server?.canPickLocalFolder || server?.canManageCloud) && <div className="library-actions">
+            {server?.canManageCloud && <button className="cloud-button" onClick={openCloudManager}><span aria-hidden="true">☁</span>连接云盘{server.cloudSourceCount > 0 ? ` · ${server.cloudSourceCount}` : ''}</button>}
+            {server?.canPickLocalFolder && <button className="add-button" onClick={() => { setFolderError(''); setFolderOpen(true); }}><span className="folder-icon" aria-hidden="true" />添加媒体文件夹</button>}
+          </div>}
         </div>
 
         {featured ? (
@@ -238,7 +419,7 @@ export function MediaLibraryView() {
               <div className="progress"><i style={{ width: `${featuredPercent}%` }} /></div>
               <div className="feature-actions">
                 <button className="primary-button" onClick={() => { window.location.href = `/watch/${featured.id}`; }}>▶ {featuredProgress ? '继续播放' : '开始播放'} <small>{featuredProgress ? formatDuration(featuredProgress.position) : formatDuration(featured.duration)}</small></button>
-                <button className="circle-button" aria-label="刷新媒体信息" onClick={() => void loadLibrary()}>↻</button>
+                <button className="circle-button" aria-label="刷新媒体信息" onClick={() => void refreshLibrary()}>↻</button>
               </div>
             </div>
           </article>
@@ -261,6 +442,7 @@ export function MediaLibraryView() {
                     {percent > 0 && <span className="card-progress"><i style={{ width: `${percent}%` }} /></span>}
                   </button>
                   <h3>{item.title}</h3><p>{mediaLabel(item)}</p>
+                  {item.sourceType !== 'local' && <span className="cloud-source-badge">☁ {item.sourceType === 'baidu' ? '百度网盘' : '夸克 / WebDAV'}</span>}
                 </article>
               );
             })}
@@ -277,6 +459,53 @@ export function MediaLibraryView() {
             {folderError && <div className="inline-error folder-error" role="alert">{folderError}</div>}
             <div><button type="button" onClick={() => setFolderOpen(false)}>取消</button><button className="add-button" type="submit" disabled={!folderPath.trim() || folderBusy}>添加并扫描</button></div>
           </form>
+        </div>
+      )}
+
+      {cloudOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCloudOpen(false); }}>
+          <section className="folder-modal cloud-modal" role="dialog" aria-modal="true" aria-labelledby="cloud-dialog-title">
+            <p className="eyebrow">COMPUTER CLOUD BRIDGE</p><h2 id="cloud-dialog-title">连接云盘</h2>
+            <p>云盘文件先经过这台电脑，超分与转码也全部在电脑端完成。Vision Pro 不会接触网盘凭据或下载地址。</p>
+
+            {cloudSources.length > 0 && <div className="cloud-toolbar"><span>已连接 {cloudSources.length} 个云盘</span><button disabled={cloudBusy} onClick={() => void refreshCloudSources()}>↻ 重新扫描</button></div>}
+
+            {cloudSources.length > 0 && <div className="cloud-source-list">
+              {cloudSources.map((source) => <article key={source.id}>
+                <div><strong>{source.name}</strong><small>{source.connection} · {source.fileCount} 个媒体文件 · {source.rootPath}</small>{source.error && <em>{source.error}</em>}</div>
+                <button disabled={cloudBusy} onClick={() => void removeCloudSource(source.id)}>移除</button>
+              </article>)}
+            </div>}
+
+            <div className="cloud-provider-tabs" role="tablist" aria-label="云盘类型">
+              <button className={cloudProvider === 'quark' ? 'active' : ''} onClick={() => { setCloudProvider('quark'); setWebDav((current) => ({ ...current, rootPath: '/Quark' })); }}>夸克网盘</button>
+              <button className={cloudProvider === 'baidu' ? 'active' : ''} onClick={() => { setCloudProvider('baidu'); setWebDav((current) => ({ ...current, rootPath: '/Baidu' })); }}>百度网盘</button>
+            </div>
+
+            {cloudProvider === 'baidu' && <label className="cloud-method">接入方式<select aria-label="百度网盘接入方式" value={baiduConnection} onChange={(event) => setBaiduConnection(event.target.value as 'official' | 'webdav')}><option value="official">百度官方 API（推荐）</option><option value="webdav">本机 OpenList WebDAV</option></select></label>}
+
+            {cloudProvider === 'baidu' && baiduConnection === 'official' ? (
+              <form className="cloud-form" onSubmit={startBaiduAuthorization}>
+                <div className="cloud-notice"><strong>官方设备码授权</strong><span>请先在百度网盘开放平台创建“软件”应用。新应用默认只能访问“我的应用数据/应用名”。AppKey 与 SecretKey 仅加密保存在这台电脑。</span></div>
+                <label>应用目录名称<input required aria-label="百度应用目录名称" value={baiduApp.appFolder} onChange={(event) => setBaiduApp({ ...baiduApp, appFolder: event.target.value })} placeholder="Localis" /></label>
+                <label>AppKey<input required aria-label="百度 AppKey" value={baiduApp.appKey} onChange={(event) => setBaiduApp({ ...baiduApp, appKey: event.target.value })} autoComplete="off" /></label>
+                <label>SecretKey<input required aria-label="百度 SecretKey" type="password" value={baiduApp.secretKey} onChange={(event) => setBaiduApp({ ...baiduApp, secretKey: event.target.value })} autoComplete="new-password" /></label>
+                {baiduAuthorization && <div className="baidu-authorization"><img src={baiduAuthorization.qrCodeDataUrl} alt="百度网盘授权二维码" /><div><strong>使用百度网盘 App 扫码授权</strong><span>用户码：{baiduAuthorization.userCode || '见授权页面'}</span><a href={baiduAuthorization.verificationUrl} target="_blank" rel="noreferrer">打开百度授权页面</a><small>Localis 正在等待授权结果，短暂断网会自动重试。</small><button type="button" onClick={() => void cancelBaiduLink()}>取消本次授权</button></div></div>}
+                {cloudError && <div className="inline-error folder-error" role="alert">{cloudError}</div>}
+                <div><button type="button" onClick={() => setCloudOpen(false)}>关闭</button><button className="add-button" disabled={cloudBusy || Boolean(baiduAuthorization)}>{baiduAuthorization ? '等待扫码…' : cloudBusy ? '正在连接…' : '获取授权二维码'}</button></div>
+              </form>
+            ) : (
+              <form className="cloud-form" onSubmit={connectWebDav}>
+                <div className="cloud-notice"><strong>{cloudProvider === 'quark' ? '夸克仅支持第三方只读桥接' : 'OpenList 高级兼容方式'}</strong><span>Localis 不抓取网盘 Cookie。请让 OpenList 只监听 127.0.0.1，并创建仅有 WebDAV Read 权限的 localis-reader 用户；在对应存储设置中把“WebDAV 策略”设为“本机代理（Native Proxy）”。</span></div>
+                <label>OpenList WebDAV 地址<input required aria-label="OpenList WebDAV 地址" value={webDav.baseUrl} onChange={(event) => setWebDav({ ...webDav, baseUrl: event.target.value })} placeholder="http://127.0.0.1:5244/dav/" /></label>
+                <label>云盘挂载路径<input required aria-label="云盘挂载路径" value={webDav.rootPath} onChange={(event) => setWebDav({ ...webDav, rootPath: event.target.value })} placeholder={cloudProvider === 'quark' ? '/Quark' : '/Baidu'} /></label>
+                <label>只读用户名<input required aria-label="OpenList 只读用户名" value={webDav.username} onChange={(event) => setWebDav({ ...webDav, username: event.target.value })} autoComplete="username" /></label>
+                <label>只读密码<input required aria-label="OpenList 只读密码" type="password" value={webDav.password} onChange={(event) => setWebDav({ ...webDav, password: event.target.value })} autoComplete="current-password" /></label>
+                {cloudError && <div className="inline-error folder-error" role="alert">{cloudError}</div>}
+                <div><button type="button" onClick={() => setCloudOpen(false)}>关闭</button><button className="add-button" disabled={cloudBusy}>{cloudBusy ? '正在测试并扫描…' : '连接并扫描'}</button></div>
+              </form>
+            )}
+          </section>
         </div>
       )}
     </main>

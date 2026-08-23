@@ -1,18 +1,11 @@
 import * as THREE from 'three';
 import type { EyeOrder, Projection, StereoLayout } from '@/server/types';
-import {
-  VideoSuperResolutionPass,
-  stereoSamplingBounds,
-  type SuperResolutionDiagnostics,
-  type SuperResolutionMode,
-} from '@/app/lib/video-super-resolution';
 
 export interface XrVideoOptions {
   projection: Projection;
   stereo: StereoLayout;
   eyeOrder: EyeOrder;
   yawOffset: number;
-  superResolution: SuperResolutionMode;
 }
 
 export interface XrDiagnostics {
@@ -23,10 +16,26 @@ export interface XrDiagnostics {
   videoHeight: number;
   droppedFrames?: number;
   totalFrames?: number;
-  superResolution: SuperResolutionDiagnostics;
 }
 
 type ControlAction = { mesh: THREE.Mesh; run: () => void };
+
+export function stereoSamplingBounds(stereo: StereoLayout, effectiveEye: 0 | 1, textureWidth: number, textureHeight: number) {
+  if (stereo === 'sbs') {
+    const halfTexel = 0.5 / Math.max(2, textureWidth);
+    const minimum = effectiveEye === 0 ? halfTexel : 0.5 + halfTexel;
+    const maximum = effectiveEye === 0 ? 0.5 - halfTexel : 1 - halfTexel;
+    return { minimum, span: Math.max(0, maximum - minimum) };
+  }
+  const halfTexel = 0.5 / Math.max(2, textureHeight);
+  // THREE.VideoTexture uses flipY=true. In a conventional top/bottom LR file,
+  // the left eye occupies the source image's top half, which is the upper half
+  // of WebGL UV space after the texture flip.
+  const textureEye = effectiveEye === 0 ? 1 : 0;
+  const minimum = textureEye === 0 ? halfTexel : 0.5 + halfTexel;
+  const maximum = textureEye === 0 ? 0.5 - halfTexel : 1 - halfTexel;
+  return { minimum, span: Math.max(0, maximum - minimum) };
+}
 
 function labelTexture(label: string) {
   const canvas = document.createElement('canvas');
@@ -78,7 +87,6 @@ export class XrVideoStage {
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(70, 1, 0.01, 100);
   private readonly texture: THREE.VideoTexture;
-  private readonly superResolutionPass: VideoSuperResolutionPass;
   private readonly mediaMeshes: THREE.Mesh[] = [];
   private readonly controls: ControlAction[] = [];
   private readonly captionCanvas = document.createElement('canvas');
@@ -94,8 +102,6 @@ export class XrVideoStage {
   private entering = false;
   private disposed = false;
   private shouldPlayInXr = false;
-  private videoFrameCallback?: number;
-  private hasVideoFrameCallback = false;
   private options: XrVideoOptions;
 
   constructor(
@@ -119,8 +125,6 @@ export class XrVideoStage {
     this.texture.minFilter = THREE.LinearFilter;
     this.texture.magFilter = THREE.LinearFilter;
     this.texture.generateMipmaps = false;
-    this.superResolutionPass = new VideoSuperResolutionPass(this.texture);
-    this.configureSuperResolution();
     this.camera.layers.enable(1);
     this.buildMediaMeshes();
     this.buildControls();
@@ -138,27 +142,12 @@ export class XrVideoStage {
     this.video.addEventListener('loadedmetadata', this.onVideoGeometryChange);
     this.video.addEventListener('resize', this.onVideoGeometryChange);
     this.video.addEventListener('ended', this.onVideoEnded);
-    this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
-    this.renderer.domElement.addEventListener('webglcontextrestored', this.onContextRestored);
-    this.scheduleVideoFrame();
   }
 
   update(options: XrVideoOptions) {
     if (this.disposed) return;
     this.options = options;
-    this.configureSuperResolution();
     this.buildMediaMeshes();
-  }
-
-  private configureSuperResolution(active = Boolean(this.session)) {
-    this.superResolutionPass.configure(
-      this.renderer,
-      this.video.videoWidth,
-      this.video.videoHeight,
-      active ? this.options.superResolution : 'off',
-      this.options.stereo,
-      this.options.projection,
-    );
   }
 
   private createGeometry() {
@@ -178,30 +167,9 @@ export class XrVideoStage {
 
   private onVideoGeometryChange = () => {
     if (this.disposed) return;
-    this.configureSuperResolution();
     this.buildMediaMeshes();
   };
   private onVideoEnded = () => { this.shouldPlayInXr = false; };
-
-  private scheduleVideoFrame() {
-    if (this.disposed || !('requestVideoFrameCallback' in this.video)) return;
-    this.hasVideoFrameCallback = true;
-    this.videoFrameCallback = this.video.requestVideoFrameCallback(() => {
-      this.superResolutionPass.markFrame();
-      this.scheduleVideoFrame();
-    });
-  }
-
-  private onContextLost = (event: Event) => {
-    event.preventDefault();
-    this.superResolutionPass.setContextLost(true);
-  };
-
-  private onContextRestored = () => {
-    this.superResolutionPass.setContextLost(false);
-    this.configureSuperResolution();
-    this.buildMediaMeshes();
-  };
 
   private buildMediaMeshes() {
     for (const mesh of this.mediaMeshes) {
@@ -212,12 +180,12 @@ export class XrVideoStage {
     this.mediaMeshes.length = 0;
 
     const eyes: Array<0 | 1> = this.options.stereo === 'mono' ? [0] : [0, 1];
-    const textureWidth = this.superResolutionPass.plan.outputWidth || this.video.videoWidth || 2;
-    const textureHeight = this.superResolutionPass.plan.outputHeight || this.video.videoHeight || 2;
+    const textureWidth = this.video.videoWidth || 2;
+    const textureHeight = this.video.videoHeight || 2;
     for (const eye of eyes) {
       const geometry = this.createGeometry();
       applyStereoUv(geometry, this.options.stereo, eye, this.options.eyeOrder, textureWidth, textureHeight);
-      const material = new THREE.MeshBasicMaterial({ map: this.superResolutionPass.outputTexture, side: THREE.FrontSide, toneMapped: false });
+      const material = new THREE.MeshBasicMaterial({ map: this.texture, side: THREE.FrontSide, toneMapped: false });
       const mesh = new THREE.Mesh(geometry, material);
       if (this.options.projection === 'flat') mesh.position.set(0, 0, -5);
       mesh.rotation.y = this.options.yawOffset;
@@ -300,7 +268,6 @@ export class XrVideoStage {
     this.renderer.domElement.style.display = 'none';
     this.renderer.setAnimationLoop(null);
     if (!this.disposed) {
-      this.configureSuperResolution(false);
       this.buildMediaMeshes();
     }
     this.onSessionStateChange?.(false);
@@ -375,7 +342,6 @@ export class XrVideoStage {
 
       this.session = session;
       this.shouldPlayInXr = true;
-      this.configureSuperResolution(true);
       this.buildMediaMeshes();
       session.addEventListener('selectstart', this.onSelectStart);
       session.addEventListener('select', this.onSelect);
@@ -390,8 +356,6 @@ export class XrVideoStage {
       }
       this.onSessionStateChange?.(true);
       this.renderer.setAnimationLoop(() => {
-        if (!this.hasVideoFrameCallback && !this.video.paused) this.superResolutionPass.markFrame();
-        this.superResolutionPass.render(this.renderer);
         this.updateCaptions();
         const xrCamera = this.renderer.xr.getCamera();
         xrCamera.getWorldPosition(this.viewerPosition);
@@ -428,7 +392,6 @@ export class XrVideoStage {
       videoHeight: this.video.videoHeight,
       droppedFrames: quality?.droppedVideoFrames,
       totalFrames: quality?.totalVideoFrames,
-      superResolution: this.superResolutionPass.diagnostics(),
     };
   }
 
@@ -444,9 +407,6 @@ export class XrVideoStage {
     this.video.removeEventListener('loadedmetadata', this.onVideoGeometryChange);
     this.video.removeEventListener('resize', this.onVideoGeometryChange);
     this.video.removeEventListener('ended', this.onVideoEnded);
-    this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
-    this.renderer.domElement.removeEventListener('webglcontextrestored', this.onContextRestored);
-    if (this.videoFrameCallback !== undefined && 'cancelVideoFrameCallback' in this.video) this.video.cancelVideoFrameCallback(this.videoFrameCallback);
     for (const mesh of this.mediaMeshes) {
       mesh.geometry.dispose();
       (mesh.material as THREE.Material).dispose();
@@ -460,7 +420,6 @@ export class XrVideoStage {
     this.captionMesh.geometry.dispose();
     (this.captionMesh.material as THREE.Material).dispose();
     this.captionTexture.dispose();
-    this.superResolutionPass.dispose();
     this.texture.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();

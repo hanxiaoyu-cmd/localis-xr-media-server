@@ -91,8 +91,10 @@ export async function loadConfig(): Promise<LocalisConfig> {
     allowedHosts: [...allowedHosts],
     ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
     ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
-    maxTranscodes: Math.max(1, Number(process.env.LOCALIS_MAX_TRANSCODES || 1)),
+    maxTranscodes: Math.max(1, Number(process.env.LOCALIS_MAX_TRANSCODES || 2)),
     maxCacheBytes: Math.max(1, Number(process.env.LOCALIS_CACHE_GB || 20)) * 1024 ** 3,
+    cloudCacheBytes: Math.max(1, Number(process.env.LOCALIS_CLOUD_CACHE_GB || 50)) * 1024 ** 3,
+    maxCloudDownloads: Math.min(2, Math.max(1, Number(process.env.LOCALIS_MAX_CLOUD_DOWNLOADS || 1))),
   };
 }
 
