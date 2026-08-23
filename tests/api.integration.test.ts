@@ -56,6 +56,19 @@ afterAll(async () => {
 });
 
 describe('Localis API', () => {
+  it('exposes the ephemeral pairing code only to the computer loopback status endpoint', async () => {
+    const response = await host(request(api).get('/api/pair/status')).expect(200);
+    expect(response.body).toMatchObject({ paired: true, pairingRequired: false });
+    expect(response.body).not.toHaveProperty('pairingCode');
+
+    const protectedConfig = { ...deps.config, authDisabled: false, pairingCode: '654321' };
+    const protectedAuth = new PairingAuth(protectedConfig);
+    await protectedAuth.initialize();
+    const protectedApi = createApiApp({ ...deps, config: protectedConfig, auth: protectedAuth });
+    const desktopStatus = await host(request(protectedApi).get('/api/pair/status')).expect(200);
+    expect(desktopStatus.body).toMatchObject({ paired: false, pairingRequired: true, pairingCode: '654321' });
+  });
+
   it('opens the injected desktop picker, scans its selection and handles cancellation or busy state', async () => {
     const selectedDirectory = await mkdtemp(path.join(tempDir, 'picked-media-'));
     const originalDirectories = [...deps.config.mediaDirs];

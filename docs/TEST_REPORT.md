@@ -7,6 +7,7 @@
 - Windows 11 专业版 `10.0.26200`
 - Node.js `v24.11.0`，npm `11.13.0`
 - FFmpeg/ffprobe `8.1.1-full_build-www.gyan.dev`
+- Windows 包内 FFmpeg `6.1.1-essentials`、ffprobe `4.0.2`、Electron `43.4.1`
 - GPU：NVIDIA GeForce RTX 5090 D
 - 浏览器：Codex 内置 Chromium，生产构建真实页面与媒体元素
 - 当前 LAN 地址：`192.168.31.87:8080`
@@ -51,6 +52,10 @@
 | 内部界面端口 | 通过 | Vinext 仅绑定 `127.0.0.1:3210`，LAN 只暴露带配对与安全头的 8080 |
 | 依赖审计 | 通过 | `npm audit --audit-level=low`：0 个已知漏洞 |
 | 浏览器控制台 | 通过 | 最终 localhost 播放器、云盘弹窗与 LAN 首页均为 0 个 error/warning |
+| Windows 安装版 | 通过 | NSIS 静默安装到隔离目录，安装后真实启动、扫描、转码，再由自带卸载器完整移除 |
+| Windows 便携版 | 通过 | 最终 Release EXE 首次解压并真实启动；内置 ffprobe 扫描 14 个媒体，内置 FFmpeg/NVENC 生成 1280×720 → 1600×900、4,765,048 字节 MPEG-TS 分片 |
+| 桌面安全边界 | 通过 | localhost 自动完成电脑端配对并显示六位码；通过 `192.168.31.87` 请求的 LAN 客户端响应不含配对码，管理能力仍不可见 |
+| 最终桌面视觉 | 通过 | 最终便携版页面实际截图检查：绿色/石墨控制台、配对码卡片、播放器进度与电脑端超分状态正常；浏览器 0 个 error/warning |
 
 ### HLS 输出实测
 

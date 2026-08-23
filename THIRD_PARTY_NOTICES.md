@@ -1,13 +1,39 @@
 # Third-party notices
 
-Localis 的当前电脑端超分由用户电脑上的 FFmpeg `zscale`、`cas` 与标准 H.264 编码器组合实现，没有复制 AMD FSR、NVIDIA DLSS、Real-ESRGAN 或其他神经超分项目的源代码，也不应被描述为这些项目的认证实现或 AI 超分。
+Localis 本体与下列第三方组件是可分离的作品。第三方许可证只适用于对应组件；精确版本以 `package-lock.json` 和发行包内文件为准。
 
-本项目通过 npm 使用多个开源依赖。主要运行时依赖包括 React、Three.js、Hls.js、Express、Vinext、ACME Client、http-proxy 和 qrcode；其准确版本和完整传递依赖以 `package-lock.json` 为准。发布者应保留各依赖包自带的许可证文本。当前依赖审计显示运行时直接依赖采用 MIT、Apache-2.0 等许可，具体义务仍以各包内许可证为准。
+## FFmpeg 6.1.1 Windows binary
 
-Localis 调用用户电脑上已有的 FFmpeg/ffprobe，不在本仓库中分发 FFmpeg 二进制。FFmpeg 构建的许可取决于其编译选项；包含 libx264 的常见 Windows full build 通常涉及 GPL 义务。若未来随 Localis 分发 FFmpeg，发布者必须单独完成许可证、源代码提供和通知义务。
+Windows 发行包通过 `ffmpeg-static@5.3.0` 携带 `FFmpeg 6.1.1-essentials_build-www.gyan.dev`。该二进制启用了 GPL 组件（包括 libx264）并以 GNU GPL version 3 发布。
 
-Localis 只实现标准 WebDAV 客户端兼容层，不复制、链接或捆绑 OpenList。OpenList 是独立的 AGPL-3.0 项目，由选择该实验性云盘桥接方式的用户自行安装和维护；若未来捆绑、修改或分发 OpenList，发布者必须另行履行 AGPL-3.0 义务。夸克 OpenList 驱动使用非官方接口，不属于 Localis 或夸克的官方集成。
+- Binary package: https://github.com/eugeneware/ffmpeg-static/tree/5.3.0
+- Exact FFmpeg source commit: https://github.com/FFmpeg/FFmpeg/tree/e38092ef93
+- Build provider: https://www.gyan.dev/ffmpeg/builds/
+- License text: `node_modules/ffmpeg-static/ffmpeg.exe.LICENSE` in the packaged application
+- Build configuration: `node_modules/ffmpeg-static/ffmpeg.exe.README` in the packaged application
 
-Localis 仓库不捆绑夸克官方网盘 Skill/CLI。只有用户在电脑端明确点击“安装夸克官方组件”后，Localis 才会从夸克官方 GitHub 仓库下载组件并运行其官方安装器；动态运行时位于仓库外的系统应用数据目录。该官方仓库采用 Apache-2.0，发布者和再分发者仍应保留其许可证与通知。Localis 仅调用官方公开的浏览器授权、搜索与完整文件下载命令，不把它描述成 Windows Range 流媒体 SDK，也不启用 OpenList QuarkTV 当前通过第三方明文 HTTP 服务交换登录票据的扫码链路。
+Localis 通过独立子进程调用 FFmpeg，没有把 FFmpeg 代码链接进 Localis 本体。无论这种边界如何解释，发布者仍完整保留并履行 FFmpeg 二进制自身的 GPLv3 义务。
 
-项目本身目前没有开源许可证。没有明确许可证并不等于允许复制、修改或再发布；在许可证决定完成前，GitHub 仓库应保持私有。
+## ffprobe 4.0.2 Windows binary
+
+Windows 发行包通过 `ffprobe-static@3.1.0` 携带 FFmpeg 项目的 ffprobe 4.0.2 GPLv3 Windows 二进制。
+
+- Wrapper package: https://github.com/joshwnj/ffprobe-static/tree/v3.1.0
+- Corresponding FFmpeg source: https://github.com/FFmpeg/FFmpeg/tree/n4.0.2
+- FFmpeg GPLv3 text: https://github.com/FFmpeg/FFmpeg/blob/n4.0.2/COPYING.GPLv3
+
+`ffprobe-static` JavaScript wrapper采用 MIT License；发行包保留其 `LICENSE`。ffprobe 二进制的 GPLv3 义务独立存在。
+
+## npm runtime dependencies
+
+主要运行时依赖包括 Electron、React、Three.js、hls.js、Express、Vinext、ACME Client、http-proxy、qrcode、ffmpeg-static 与 ffprobe-static。完整直接及传递依赖、版本与完整性摘要以 `package-lock.json` 为准。发行包保留各 npm 包自带的许可证文件。
+
+## Cloud connectors
+
+- Localis 只实现标准 WebDAV 客户端兼容层，不复制、链接或捆绑 OpenList。OpenList 是独立的 AGPL-3.0 项目。
+- Localis 不在仓库或 Windows 包内预装夸克官方网盘组件。只有用户在电脑端明确点击安装后，Localis 才把官方组件下载到系统应用数据目录。该组件采用其上游仓库声明的许可证。
+- 百度网盘接入使用用户自行申请并通过审核的开放平台应用身份；应用密钥不会随桌面发行包分发。
+
+## Super resolution description
+
+Localis 当前电脑端超分由 FFmpeg 的空间缩放、环绕采样与锐化滤镜组成，没有复制 AMD FSR、NVIDIA DLSS、Real-ESRGAN 或其他神经超分项目源码，也不应描述为这些项目的认证实现或 AI 超分。

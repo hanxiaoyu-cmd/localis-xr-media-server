@@ -1,7 +1,10 @@
 {
   "name": "localis-xr-media-server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
+  "description": "No-app LAN media server for Vision Pro, Quest and PICO.",
+  "author": "Localis contributors",
+  "main": "desktop/main.cjs",
   "engines": {
     "node": ">=22.13.0"
   },
@@ -15,24 +18,31 @@
     "start:web": "vinext start --port 3210 --hostname 127.0.0.1",
     "server": "tsx server/index.ts",
     "start:local": "concurrently -k -s first \"npm:start:web\" \"npm:server\"",
+    "build:desktop-server": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node24 --packages=external --outfile=desktop/build/server.mjs",
+    "build:desktop": "npm run build && npm run build:desktop-server",
+    "desktop": "npm run build:desktop && electron .",
+    "package:win": "npm run build:desktop && electron-builder --win nsis portable --x64",
     "fixtures": "tsx scripts/generate-fixtures.ts",
     "tls:provision": "tsx scripts/provision-tls.ts",
     "pretest": "npm run fixtures",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .localis"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .localis --ignore-pattern .localis-* --ignore-pattern desktop/build --ignore-pattern release"
   },
   "dependencies": {
     "acme-client": "^5.4.0",
     "express": "^5.2.1",
+    "ffmpeg-static": "5.3.0",
+    "ffprobe-static": "3.1.0",
     "hls.js": "^1.7.1",
     "http-proxy": "^1.18.1",
     "next": "^16.3.2",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "three": "^0.185.1"
+    "three": "^0.185.1",
+    "vinext": "1.0.0-beta.8"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.53.1",
@@ -51,17 +61,63 @@
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "^0.5.34",
     "concurrently": "^10.0.5",
+    "electron": "43.4.1",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
     "eslint": "9.39.4",
     "eslint-config-next": "^16.3.2",
     "react-server-dom-webpack": "^19.2.8",
     "supertest": "^7.2.2",
     "tailwindcss": "4.2.1",
-    "tsx": "^4.23.12",
+    "tsx": "4.23.12",
     "typescript": "5.9.3",
-    "vinext": "^1.0.0-beta.8",
     "vite": "^8.2.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.125.0"
+  },
+  "build": {
+    "appId": "com.localis.xrmediaserver",
+    "productName": "Localis",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "desktop/**/*",
+      "dist/**/*",
+      "package.json",
+      "node_modules/**/*",
+      "!node_modules/ffprobe-static/bin/darwin/**/*",
+      "!node_modules/ffprobe-static/bin/linux/**/*",
+      "!node_modules/ffprobe-static/bin/win32/ia32/**/*",
+      "!node_modules/ffprobe-static/bin/win32/x86/**/*",
+      "!node_modules/ffprobe-static/bin/win32/arm64/**/*",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      "THIRD_PARTY_NOTICES.md",
+      "LICENSE.md"
+    ],
+    "win": {
+      "icon": "desktop/assets/icon.png",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "artifactName": "Localis-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Localis",
+      "artifactName": "Localis-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Localis-Portable-${version}-${arch}.${ext}"
+    }
   },
   "type": "module"
 }

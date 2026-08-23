@@ -1,0 +1,25 @@
+name: Feature request
+description: 提议符合电脑端计算、头显零安装原则的新能力
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决的问题
+      description: 描述使用场景，不要只写实现名称。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: 对隐私、性能和头显零安装的影响
+      description: 说明计算发生在哪里、数据是否离开局域网、长视频是否仍可跳转。
+    validations:
+      required: true

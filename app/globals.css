@@ -40,6 +40,9 @@ button { color: inherit; }
 .status-dot { width: 7px; height: 7px; display: inline-block; flex: 0 0 auto; border-radius: 999px; background: var(--accent); box-shadow: 0 0 0 3px rgba(184,255,92,.1); }
 .server-card strong { display: block; margin-top: 10px; font: 12px var(--font-geist-mono); color: #eceee9; }
 .server-card small { display: block; margin-top: 4px; color: #676b73; font-size: 10px; }
+.server-code { margin: 12px 0 3px; padding: 10px 11px; border: 1px solid rgba(184,255,92,.18); border-radius: 9px; background: rgba(184,255,92,.045); }
+.server-code small { margin: 0 0 4px; color: #7f867e; font-size: 8px; letter-spacing: 1px; text-transform: uppercase; }
+.server-code b { color: var(--accent); font: 600 18px var(--font-geist-mono); letter-spacing: 2px; }
 
 .content { min-width: 0; padding: 0 54px 54px; overflow: hidden; }
 .topbar { height: 88px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }

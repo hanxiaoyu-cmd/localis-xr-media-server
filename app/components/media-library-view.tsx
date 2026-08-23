@@ -21,6 +21,7 @@ interface ServerInfo {
   nativeFolderPicker: boolean;
   canManageCloud: boolean;
   cloudSourceCount: number;
+  pairingCode?: string;
 }
 
 interface CloudSourceSummary {
@@ -181,7 +182,11 @@ export function MediaLibraryView() {
     setLoading(true);
     setError('');
     try {
-      const status = await jsonFetch<{ paired: boolean }>('/api/pair/status');
+      const status = await jsonFetch<{ paired: boolean; pairingCode?: string }>('/api/pair/status');
+      if (!status.paired && status.pairingCode) {
+        await jsonFetch('/api/pair/verify', { method: 'POST', body: JSON.stringify({ code: status.pairingCode }) });
+        status.paired = true;
+      }
       if (!status.paired) {
         setNeedsPairing(true);
         return;
@@ -624,6 +629,7 @@ export function MediaLibraryView() {
         <div className="sidebar-spacer" />
         <div className="server-card">
           <div className="server-line"><span className="status-dot" />局域网服务在线</div>
+          {server?.pairingCode && <div className="server-code"><small>设备配对码</small><b>{server.pairingCode.slice(0, 3)} {server.pairingCode.slice(3)}</b></div>}
           <strong>{server?.publicUrl || server?.lanUrls[0]?.replace(/^https?:\/\//, '') || '正在检测…'}</strong>
           <small>{server?.secure ? '可信 HTTPS · WebXR 可用' : 'HTTP · 仅桌面测试 WebXR'}</small>
         </div>

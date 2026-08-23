@@ -1,0 +1,53 @@
+name: Bug report
+description: 报告可复现的播放、桌面或局域网问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: 请先移除媒体路径、账号、配对码、Cookie、token 和私钥。
+  - type: input
+    id: version
+    attributes:
+      label: Localis 版本
+      placeholder: v0.3.0 / commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: 播放设备
+      options:
+        - Vision Pro
+        - Quest
+        - PICO
+        - 手机或平板
+        - Windows 电脑端
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: Windows 版本、浏览器、网络结构、媒体容器/编码/分辨率；不要填写隐私数据。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期与实际结果
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我已经移除账号、token、Cookie、私钥、媒体绝对路径与配对码。
+          required: true

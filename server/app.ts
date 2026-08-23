@@ -147,7 +147,12 @@ export function createApiApp(deps: AppDependencies) {
     res.json({ ok: true, service: 'localis', mediaCount: library.items.size, encoder: transcodes.encoder });
   });
   app.get('/api/pair/status', (req, res) => {
-    res.json({ paired: auth.isAuthenticated(req), pairingRequired: !config.authDisabled });
+    const isDesktop = isLoopbackAddress(req.socket.remoteAddress);
+    res.json({
+      paired: auth.isAuthenticated(req),
+      pairingRequired: !config.authDisabled,
+      pairingCode: isDesktop && !config.authDisabled ? config.pairingCode : undefined,
+    });
   });
   app.post('/api/pair/verify', (req, res) => auth.verify(req, res));
 
@@ -165,6 +170,7 @@ export function createApiApp(deps: AppDependencies) {
       encoder: transcodes.encoder,
       mediaCount: library.items.size,
       libraryCount: config.mediaDirs.length,
+      pairingCode: isLoopbackAddress(req.socket.remoteAddress) && !config.authDisabled ? config.pairingCode : undefined,
       canPickLocalFolder: isLoopbackAddress(req.socket.remoteAddress),
       nativeFolderPicker: ['win32', 'darwin', 'linux'].includes(process.platform),
       canManageCloud: isLoopbackAddress(req.socket.remoteAddress),
