@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | ESLint | 通过 | 全项目无 lint 错误或警告 |
 | TypeScript | 通过 | `tsc --noEmit` |
-| 单元/集成 | 11 个文件、51 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、电脑端超分、真实转码、二维码登录界面、云盘协议与安全边界 |
+| 单元/集成 | 12 个文件、58 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、电脑端超分、真实转码、电脑端云盘工作台、云盘协议与安全边界 |
 | 生产构建 | 通过 | Vinext 五阶段 client/RSC/SSR 构建 |
 | 编码器探测 | 通过 | NVENC、Media Foundation、libx264 运行时真实编码探测；本机自动选择 NVENC |
 | NVENC 路径 | 通过 | 完整集成套件真实生成 H.264/yuv420p + AAC fMP4 HLS |
@@ -33,13 +33,16 @@
 | OpenList/WebDAV | 通过 | 真实本机 mock HTTP 服务：Depth 1 的 207 XML、嵌套目录、自身目录去重、越界 href 过滤、Basic Auth、Range、完整缓存 |
 | WebDAV 安全边界 | 通过 | 拒绝远程地址与 URL 内嵌凭据；存储 JSON 中无明文密码；重启后可用密钥解密并重新扫描 |
 | 百度设备码 OAuth | 通过（协议模拟） | device code、二维码、token、`/apps/Localis` 递归列表、filemetas dlink、302、必需 UA 与 Range |
-| 云盘二维码界面 | 通过 | 百度默认 0 个凭据输入框；发布者未配置时按钮安全禁用；配置后会话幂等复用；夸克不安全直连禁用且高级 WebDAV 默认折叠 |
-| 百度凭据保护 | 通过 | 持久化文件中不包含 SecretKey、Access Token 或 Refresh Token 明文 |
+| 百度电脑端首次设置 | 通过 | localhost 一次提交 AppKey/SecretKey/应用目录、AES-256-GCM 持久化、重启恢复、环境配置优先、删除设置；LAN 接口拒绝访问 |
+| 夸克官方组件契约 | 4/4 通过 | 版本门禁、artifact 全量媒体、流式 NDJSON 进度、浏览器登录、手动授权码、不透明选择 ID、完整下载、总容量拒绝、ffprobe、原子入库与未登录错误 |
+| 夸克官方组件实机探测 | 通过（未登录） | 生产 API 实际安装官方 `1.0.14-ee6c8bc`，确认 CLI 文件 SHA-256，并由真实官方 CLI 返回预期的 `401 未登录`；没有伪造真实账号结果 |
+| 云盘电脑端界面 | 3/3 通过 | 百度未配置时显示首次设置；配置后自动进入扫码；夸克显示安装/授权/搜索/下载任务；高级 WebDAV 默认折叠 |
+| 百度凭据保护 | 通过 | connector 与授权来源均不含 AppKey、SecretKey、Access/Refresh Token 明文；v1 明文 AppKey 自动迁移；损坏 key 文件安全失败且不会被覆盖 |
 | 云盘媒体脱敏 | 通过 | 公共媒体 JSON 不含 `remoteFileId`、OpenList 地址或本机上游端口 |
 | 云盘缓存 | 通过 | 默认串行下载、50 GB 可配置硬配额、磁盘余量保护、`507`、原子重命名、崩溃 `.part` 清理及持久缓存清单 |
 | 云盘 → 电脑超分 | 通过 | WebDAV 提供真实 1280×720 MP4，电脑完整缓存并 ffprobe 后生成 1600×900 Standard HLS；后续分片命中同一任务 |
 | Windows 原生文件夹选择器 | 通过 | 真实系统窗口的取消、选中、自动重新扫描；中文路径另有单元测试 |
-| 本机/局域网管理边界 | 通过 | `localhost` 显示文件夹与云盘按钮；LAN 页面两类按钮数量均为 0，13 个媒体仍正常展示 |
+| 本机/局域网管理边界 | 通过 | `localhost` 显示文件夹与云盘按钮；LAN 页面两类按钮数量均为 0，23 个媒体仍正常展示；LAN 云盘管理 API 返回 403 |
 | 原文件播放 | 通过 | 1280×720 H.264/AAC MP4 Range 直连，`readyState=4` |
 | HLS 兼容播放 | 通过 | AVI/MPEG-4 Part 2 + PCM 转 H.264/AAC，浏览器可播放 |
 | 字幕 | 通过 | 中文 SRT 转 WEBVTT，普通播放器加载同源 `<track>` |
@@ -80,8 +83,10 @@ standard SR: 1280x720 -> 1600x900
 - 恶意 WebDAV 响应中的 `/dav/Other/escape.mp4` 不会进入媒体库。
 - 百度流程执行实际 HTTP device code/token/listall/filemetas/302/download；验证两页 `start` 游标、超过 JavaScript 安全整数的 `fs_id` 不丢精度，并断言下载端收到 `User-Agent: pan.baidu.com`、原始 Range 和 Access Token。
 - 二维码由真实 `qrcode` 依赖生成 PNG data URL。
-- `/api/cloud/connectors` 不返回 AppKey、SecretKey、Token 或 WebDAV 密码；浏览器试图在请求体注入百度凭据会被忽略。
-- 生产 Chromium 实际打开云盘弹窗：百度页可见输入框为 0，夸克高级入口展开前四项输入均不可见；回到播放器后 HLS 视频 `readyState=4`、无媒体错误、控制台为空。
+- `/api/cloud/connectors` 不返回 AppKey、SecretKey、Token、夸克 FID 或 WebDAV 密码；百度设置只允许 localhost 写入并加密落盘。
+- 夸克契约替身输出与官方 NDJSON 的 `result/progress/data` 结构一致；下载命令只接收服务端保存的 FID，浏览器只能提交短期 UUID，输出路径始终由服务端决定。
+- 生产服务实际从官方仓库安装组件，版本为 `1.0.14-ee6c8bc`；未登录搜索由官方 CLI 返回 `未登录，请先执行 login 命令完成登录授权`，Localis 正确映射为 HTTP 401。
+- 生产 Chromium 实际打开云盘弹窗：百度首次设置表单与夸克安装后“打开电脑浏览器授权”入口均可用；LAN 页面不渲染云盘按钮，直接请求管理 API 返回 403；控制台为 0 个 error/warning。
 
 这些测试证明 Localis 的协议实现和安全边界，不证明第三方服务账户当前可用，也不替代真实账号授权。
 
@@ -94,7 +99,8 @@ standard SR: 1280x720 -> 1600x900
 5. 非法超分档位原本会静默降级为 `off`；路由现在返回明确的 `400 invalid_super_resolution_level`。
 6. Windows 上 FFmpeg `exit` 可能早于最终播放列表原子落盘；任务继续等待 stdio 完全关闭的 `close` 事件。
 7. Chromium 的 `canPlayType` 在此环境声称可原生播放 HLS，但实际点击后曾出现 `DEMUXER_ERROR_COULD_NOT_PARSE`。现在只有 Apple Safari（含 Vision Pro）优先原生 HLS；Quest/PICO 与桌面 Chromium 优先 hls.js，生产页面复验为 blob MediaSource、无媒体错误且时间实际推进。
-8. 原云盘窗口要求普通用户填写百度应用密钥或四项 OpenList 配置。现在百度改为发布者电脑端一次配置、用户只扫码；二维码会话可恢复。夸克现有自动扫码方案存在第三方明文票据交换，因此默认禁用，不把高风险链路伪装成便捷功能。
+8. 原云盘窗口把百度应用身份和 OpenList 参数都当作日常导入步骤。现在百度只在电脑端首次设置并加密保存，之后直接扫码；夸克改用官方组件在电脑浏览器 OAuth，再在电脑上搜索和完整下载，不把第三方明文换票链路包装成快捷登录。
+9. 云盘弹窗新增多阶段表单后，过宽的 CSS 后代选择器曾把整个弹窗根节点变成横向 flex。真实浏览器截图发现后已把规则限定到具体表单，百度与夸克页面重新截图复验布局正常。
 
 ## 尚未声称通过
 
@@ -102,7 +108,8 @@ standard SR: 1280x720 -> 1600x900
 
 - Vision Pro Safari 真机中的原生 HLS、WebXR 视频纹理、手势 transient-pointer、沉浸音频和 30 分钟稳定性。
 - Quest/PICO 控制器、真机解码器、4K/6K/8K 与 HDR 差异。
-- 真实夸克账号 + OpenList 驱动的登录过期、限速、10%/50%/90% seek 与长时播放。
+- 真实夸克账号的官方 OAuth、搜索、完整下载、重启后登录态和头显播放。本机 WSL 因 hypervisor 未启用而无法启动，Windows 本机兼容模式也不等于官方支持。
+- 真实夸克账号 + OpenList 高级兼容入口的登录过期、限速、10%/50%/90% seek 与长时播放。
 - 真实百度开发者 AppKey/SecretKey、扫码授权、账户目录权限、会员/非会员下载速度与 dlink 过期。
 - 公网可信 DNS-01 证书实际签发；缺少用户域名与 Cloudflare Token。
 - 真实 Wi-Fi 抖动、90 分钟 soak、电脑极致档并行负载。

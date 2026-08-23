@@ -14,6 +14,7 @@ import { getSubtitleVtt } from './subtitles';
 import { SourceChangedError, TranscodeCapacityError, TranscodeManager, type TranscodeJob } from './transcode-manager';
 import { parseServerSuperResolutionLevel, SERVER_SUPER_RESOLUTION_LEVELS, ServerSuperResolutionUnavailableError } from './super-resolution';
 import { CloudSourceError, CloudSourceManager } from './cloud-source-manager';
+import { QuarkConnectorError, QuarkDesktopConnector } from './quark-desktop-connector';
 import type { LocalisConfig } from './types';
 
 export interface AppDependencies {
@@ -23,6 +24,7 @@ export interface AppDependencies {
   progress: ProgressStore;
   transcodes: TranscodeManager;
   clouds?: CloudSourceManager;
+  quark?: QuarkDesktopConnector;
   pickDirectory?: () => Promise<string | undefined>;
 }
 
@@ -104,7 +106,7 @@ async function sendFileWithRange(req: Request, res: Response, filePath: string, 
 }
 
 export function createApiApp(deps: AppDependencies) {
-  const { config, library, auth, progress, transcodes, clouds } = deps;
+  const { config, library, auth, progress, transcodes, clouds, quark } = deps;
   const selectDirectory = deps.pickDirectory ?? (() => pickLocalDirectory(config.mediaDirs[0]));
   const app = express();
   app.disable('x-powered-by');
@@ -220,13 +222,20 @@ export function createApiApp(deps: AppDependencies) {
     return true;
   };
 
+  app.use('/api/cloud', (req, res, next) => {
+    if (!requireLocalCloudManagement(req, res)) return;
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
+
   app.get('/api/cloud/sources', (req, res) => {
     if (!requireLocalCloudManagement(req, res)) return;
     res.json({ sources: clouds!.summaries() });
   });
   app.get('/api/cloud/connectors', (req, res) => {
     if (!requireLocalCloudManagement(req, res)) return;
-    res.json(clouds!.connectorCapabilities());
+    const capabilities = clouds!.connectorCapabilities();
+    res.json({ ...capabilities, quark: quark?.status() ?? capabilities.quark });
   });
   app.post('/api/cloud/webdav', async (req, res, next) => {
     try {
@@ -249,6 +258,22 @@ export function createApiApp(deps: AppDependencies) {
       res.status(201).json(await clouds!.startBaiduAuthorization({
         name: String(req.body?.name || ''),
       }));
+    } catch (error) { next(error); }
+  });
+  app.put('/api/cloud/baidu/settings', async (req, res, next) => {
+    try {
+      await clouds!.configureBaiduConnector({
+        appKey: req.body?.appKey,
+        secretKey: req.body?.secretKey,
+        appFolder: req.body?.appFolder,
+      });
+      res.status(204).end();
+    } catch (error) { next(error); }
+  });
+  app.delete('/api/cloud/baidu/settings', async (_req, res, next) => {
+    try {
+      await clouds!.removeBaiduConnector();
+      res.status(204).end();
     } catch (error) { next(error); }
   });
   app.get('/api/cloud/baidu/device/:session', async (req, res, next) => {
@@ -280,6 +305,39 @@ export function createApiApp(deps: AppDependencies) {
       await library.scan();
       res.status(204).end();
     } catch (error) { next(error); }
+  });
+
+  const requireQuark = () => {
+    if (!quark) throw new QuarkConnectorError('quark_connector_unavailable', '夸克电脑端连接器尚未启动。', 503);
+    return quark;
+  };
+
+  app.get('/api/cloud/quark/status', (_req, res, next) => {
+    try { res.json(requireQuark().status()); } catch (error) { next(error); }
+  });
+  app.post('/api/cloud/quark/install', (_req, res, next) => {
+    try { res.status(202).json(requireQuark().startInstall()); } catch (error) { next(error); }
+  });
+  app.post('/api/cloud/quark/login', (_req, res, next) => {
+    try { res.status(202).json(requireQuark().startLogin()); } catch (error) { next(error); }
+  });
+  app.post('/api/cloud/quark/login/token', (req, res, next) => {
+    try {
+      if (typeof req.body?.token !== 'string') throw new QuarkConnectorError('invalid_quark_authorization_code', '请输入有效的夸克授权码。');
+      res.status(202).json(requireQuark().startLogin(req.body.token));
+    } catch (error) { next(error); }
+  });
+  app.post('/api/cloud/quark/search', async (req, res, next) => {
+    try { res.json(await requireQuark().search(String(req.body?.keyword || ''))); } catch (error) { next(error); }
+  });
+  app.post('/api/cloud/quark/downloads', (req, res, next) => {
+    try { res.status(202).json(requireQuark().startDownload(String(req.body?.resultId || ''))); } catch (error) { next(error); }
+  });
+  app.get('/api/cloud/quark/downloads/:id', (req, res, next) => {
+    try { res.json(requireQuark().download(String(req.params.id))); } catch (error) { next(error); }
+  });
+  app.delete('/api/cloud/quark/downloads/:id', (req, res, next) => {
+    try { res.json(requireQuark().cancelDownload(String(req.params.id))); } catch (error) { next(error); }
   });
 
   app.get('/api/media/:id', (req, res) => {
@@ -494,6 +552,9 @@ export function createApiApp(deps: AppDependencies) {
       return res.status(400).json({ error: 'invalid_media_directory', message: error.message });
     }
     if (error instanceof CloudSourceError) {
+      return res.status(error.status).json({ error: error.code, message: error.message });
+    }
+    if (error instanceof QuarkConnectorError) {
       return res.status(error.status).json({ error: error.code, message: error.message });
     }
     if (error instanceof TranscodeCapacityError) {

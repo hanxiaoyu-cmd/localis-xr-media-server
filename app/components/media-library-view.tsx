@@ -47,17 +47,58 @@ interface BaiduAuthorization {
 interface CloudConnectorCapabilities {
   baidu: {
     available: boolean;
+    configuration: 'ready' | 'missing' | 'invalid';
+    setupRequired: boolean;
+    managedBy?: 'environment' | 'computer';
+    canConfigure: boolean;
     login: 'qr';
     appFolder: string;
     activeAuthorization?: BaiduAuthorization;
     unavailableReason?: string;
   };
-  quark: {
-    available: false;
-    login: 'official-api-required';
-    advancedWebDavAvailable: true;
-    unavailableReason: string;
+  quark: QuarkConnectorStatus;
+}
+
+interface QuarkConnectorStatus {
+  official: true;
+  installed: boolean;
+  runtime: 'native' | 'native-compatibility';
+  officiallySupportedRuntime: boolean;
+  runtimeNotice?: string;
+  operation?: {
+    kind: 'install' | 'login';
+    state: 'running' | 'succeeded' | 'failed';
+    message?: string;
   };
+  accountState: 'unknown' | 'authorizing' | 'authenticated' | 'unauthenticated' | 'error';
+  accountMessage?: string;
+  authorizationUrl?: string;
+  needsManualToken?: boolean;
+}
+
+interface QuarkSearchResult {
+  id: string;
+  fileName: string;
+  size: number;
+  modifiedAt: string;
+  type: 'video' | 'audio';
+}
+
+interface QuarkSearchResponse {
+  total: number;
+  results: QuarkSearchResult[];
+  checkAllUrl?: string;
+}
+
+interface QuarkDownloadJob {
+  id: string;
+  resultId: string;
+  fileName: string;
+  state: 'queued' | 'downloading' | 'importing' | 'ready' | 'failed' | 'cancelled';
+  progressBytes: number;
+  totalBytes: number;
+  message?: string;
+  error?: string;
 }
 
 const posterTones = ['violet', 'ocean', 'ember', 'mint', 'gold', 'rose'];
@@ -76,6 +117,13 @@ function formatDuration(seconds: number) {
   return hours > 0
     ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
     : `${minutes}:${String(remainder).padStart(2, '0')}`;
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '未知大小';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  return `${(bytes / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
 }
 
 function mediaLabel(item: PublicMediaItem) {
@@ -119,6 +167,15 @@ export function MediaLibraryView() {
   const [cloudError, setCloudError] = useState('');
   const [webDav, setWebDav] = useState({ baseUrl: 'http://127.0.0.1:5244/dav/', rootPath: '/Quark', username: 'localis-reader', password: '' });
   const [baiduAuthorization, setBaiduAuthorization] = useState<BaiduAuthorization>();
+  const [baiduSetup, setBaiduSetup] = useState({ appKey: '', secretKey: '', appFolder: 'Localis' });
+  const [quarkKeyword, setQuarkKeyword] = useState('');
+  const [quarkResults, setQuarkResults] = useState<QuarkSearchResult[]>([]);
+  const [quarkResultTotal, setQuarkResultTotal] = useState(0);
+  const [quarkSearched, setQuarkSearched] = useState(false);
+  const [quarkSelectedId, setQuarkSelectedId] = useState('');
+  const [quarkCheckAllUrl, setQuarkCheckAllUrl] = useState('');
+  const [quarkToken, setQuarkToken] = useState('');
+  const [quarkDownload, setQuarkDownload] = useState<QuarkDownloadJob>();
 
   const loadLibrary = async () => {
     setLoading(true);
@@ -277,8 +334,7 @@ export function MediaLibraryView() {
     }
   };
 
-  const startBaiduAuthorization = async (event: FormEvent) => {
-    event.preventDefault();
+  const beginBaiduAuthorization = async () => {
     setCloudBusy(true);
     setCloudError('');
     try {
@@ -289,6 +345,110 @@ export function MediaLibraryView() {
       setBaiduAuthorization(authorization);
     } catch (cause) {
       setCloudError(cause instanceof Error ? cause.message : '无法开始百度授权');
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const saveBaiduSettings = async (event: FormEvent) => {
+    event.preventDefault();
+    setCloudBusy(true);
+    setCloudError('');
+    try {
+      await jsonFetch('/api/cloud/baidu/settings', {
+        method: 'PUT',
+        body: JSON.stringify(baiduSetup),
+      });
+      setBaiduSetup((current) => ({ ...current, appKey: '', secretKey: '' }));
+      await loadCloudConnectors();
+      await beginBaiduAuthorization();
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : '无法保存百度电脑端设置');
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const removeBaiduSettings = async () => {
+    if (!window.confirm('清除这台电脑保存的百度应用设置？已授权的百度网盘连接不会被删除。')) return;
+    setCloudBusy(true);
+    setCloudError('');
+    try {
+      await jsonFetch('/api/cloud/baidu/settings', { method: 'DELETE' });
+      setBaiduAuthorization(undefined);
+      await loadCloudConnectors();
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : '无法清除百度电脑端设置');
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const startQuarkOperation = async (endpoint: '/api/cloud/quark/install' | '/api/cloud/quark/login', fallback: string) => {
+    setCloudBusy(true);
+    setCloudError('');
+    try {
+      const status = await jsonFetch<QuarkConnectorStatus>(endpoint, { method: 'POST', body: '{}' });
+      setCloudConnectors((current) => current ? { ...current, quark: status } : current);
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : fallback);
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const submitQuarkToken = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!quarkToken.trim()) return;
+    setCloudBusy(true);
+    setCloudError('');
+    try {
+      const status = await jsonFetch<QuarkConnectorStatus>('/api/cloud/quark/login/token', {
+        method: 'POST', body: JSON.stringify({ token: quarkToken.trim() }),
+      });
+      setQuarkToken('');
+      setCloudConnectors((current) => current ? { ...current, quark: status } : current);
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : '无法提交夸克授权码');
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const searchQuark = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!quarkKeyword.trim()) return;
+    setCloudBusy(true);
+    setCloudError('');
+    setQuarkSearched(false);
+    try {
+      const result = await jsonFetch<QuarkSearchResponse>('/api/cloud/quark/search', {
+        method: 'POST', body: JSON.stringify({ keyword: quarkKeyword.trim() }),
+      });
+      setQuarkResults(result.results);
+      setQuarkResultTotal(result.total);
+      setQuarkCheckAllUrl(result.checkAllUrl || '');
+      setQuarkSearched(true);
+      setQuarkSelectedId((current) => result.results.some((entry) => entry.id === current) ? current : '');
+    } catch (cause) {
+      setCloudError(cause instanceof Error ? cause.message : '无法搜索夸克网盘');
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const downloadQuarkResult = async () => {
+    if (!quarkSelectedId) return;
+    setCloudBusy(true);
+    setCloudError('');
+    try {
+      const job = await jsonFetch<QuarkDownloadJob>('/api/cloud/quark/downloads', {
+        method: 'POST', body: JSON.stringify({ resultId: quarkSelectedId }),
+      });
+      setQuarkDownload(job);
+    } catch (cause) {
+      const status = (cause as { status?: number }).status;
+      setCloudError(status === 507 ? '电脑云盘下载空间不足，请释放空间后重试。' : cause instanceof Error ? cause.message : '无法开始夸克下载');
     } finally {
       setCloudBusy(false);
     }
@@ -308,6 +468,7 @@ export function MediaLibraryView() {
         const result = await jsonFetch<{ state: 'pending' | 'authorized'; retryAfterSeconds?: number }>(`/api/cloud/baidu/device/${baiduAuthorization.sessionId}`);
         if (cancelled) return;
         transientFailures = 0;
+        setCloudError('');
         if (result.state === 'authorized') {
           setBaiduAuthorization(undefined);
           await Promise.all([loadCloudSources(), loadCloudConnectors(), loadLibrary()]);
@@ -334,6 +495,64 @@ export function MediaLibraryView() {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [baiduAuthorization]);
+
+  useEffect(() => {
+    const quark = cloudConnectors?.quark;
+    const shouldPoll = cloudOpen && (quark?.operation?.state === 'running' || quark?.accountState === 'authorizing');
+    if (!shouldPoll) return;
+    let cancelled = false;
+    let inFlight = false;
+    const timer = window.setInterval(() => {
+      if (inFlight || cancelled) return;
+      inFlight = true;
+      void loadCloudConnectors().finally(() => { inFlight = false; });
+    }, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [cloudOpen, cloudConnectors?.quark]);
+
+  useEffect(() => {
+    if (!cloudOpen || !quarkDownload || ['ready', 'failed', 'cancelled'].includes(quarkDownload.state)) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    let failures = 0;
+    const poll = async () => {
+      try {
+        const job = await jsonFetch<QuarkDownloadJob>(`/api/cloud/quark/downloads/${quarkDownload.id}`);
+        if (cancelled) return;
+        failures = 0;
+        setCloudError('');
+        setQuarkDownload(job);
+        if (job.state === 'ready') {
+          await Promise.all([loadLibrary(), loadCloudSources(), loadCloudConnectors()]);
+          return;
+        }
+        if (job.state === 'failed' || job.state === 'cancelled') {
+          setCloudError(job.error || job.message || '夸克下载没有完成。');
+          return;
+        }
+        timer = window.setTimeout(() => { void poll(); }, 1000);
+      } catch (cause) {
+        if (cancelled) return;
+        const status = (cause as { status?: number }).status;
+        if (status === 404 || status === 410) {
+          setQuarkDownload(undefined);
+          setCloudError('下载任务已失效，请重新选择文件。');
+          return;
+        }
+        failures += 1;
+        setCloudError('暂时无法读取下载进度，Localis 会继续重试。');
+        timer = window.setTimeout(() => { void poll(); }, Math.min(10_000, 1000 * 2 ** Math.min(3, failures)));
+      }
+    };
+    timer = window.setTimeout(() => { void poll(); }, 700);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [cloudOpen, quarkDownload]);
 
   const cancelBaiduLink = async () => {
     const authorization = baiduAuthorization;
@@ -502,39 +721,74 @@ export function MediaLibraryView() {
             </div>}
 
             <div className="cloud-provider-tabs" role="tablist" aria-label="云盘类型">
-              <button className={cloudProvider === 'quark' ? 'active' : ''} onClick={() => { setCloudProvider('quark'); setWebDav((current) => ({ ...current, rootPath: '/Quark' })); }}>夸克网盘</button>
-              <button className={cloudProvider === 'baidu' ? 'active' : ''} onClick={() => { setCloudProvider('baidu'); setWebDav((current) => ({ ...current, rootPath: '/Baidu' })); }}>百度网盘</button>
+              <button className={cloudProvider === 'quark' ? 'active' : ''} onClick={() => { setCloudProvider('quark'); setCloudError(''); setWebDav((current) => ({ ...current, rootPath: '/Quark' })); }}>夸克网盘</button>
+              <button className={cloudProvider === 'baidu' ? 'active' : ''} onClick={() => { setCloudProvider('baidu'); setCloudError(''); setWebDav((current) => ({ ...current, rootPath: '/Baidu' })); }}>百度网盘</button>
             </div>
 
             {cloudProvider === 'baidu' ? (
-              <form className="cloud-form" onSubmit={startBaiduAuthorization}>
+              <div className="cloud-form">
                 <div className="cloud-login-hero">
                   <span className="cloud-provider-mark baidu" aria-hidden="true">度</span>
-                  <div><strong>扫码登录百度网盘</strong><span>无需在网页中填写 AppKey、SecretKey、地址或密码。授权完成后，媒体会自动出现在资料库。</span></div>
+                  <div><strong>扫码登录百度网盘</strong><span>应用设置、扫码授权、下载和转码都只在这台电脑完成，头显看不到任何网盘凭据。</span></div>
                 </div>
-                <div className={`cloud-notice ${cloudConnectors?.baidu.available ? 'ready' : 'warning'}`}>
-                  <strong>{cloudConnectors?.baidu.available ? '官方设备码已就绪' : '等待 Localis 发布者配置官方应用'}</strong>
-                  <span>{cloudConnectors?.baidu.available
-                    ? `扫码后只读取“我的应用数据/${cloudConnectors.baidu.appFolder}”中的媒体；网盘文件仍由这台电脑读取。`
-                    : cloudConnectors?.baidu.unavailableReason || '正在检查百度网盘登录能力…'}</span>
-                </div>
-                {baiduAuthorization && <div className="baidu-authorization"><img src={baiduAuthorization.qrCodeDataUrl} alt="百度网盘授权二维码" /><div><strong>使用百度网盘 App 扫码授权</strong><span>用户码：{baiduAuthorization.userCode || '见授权页面'}</span><a href={baiduAuthorization.verificationUrl} target="_blank" rel="noreferrer">打开百度授权页面</a><small>Localis 正在等待授权结果，短暂断网会自动重试。</small><button type="button" onClick={() => void cancelBaiduLink()}>取消本次授权</button></div></div>}
+                {cloudConnectors?.baidu.available ? (
+                  <>
+                    <div className="cloud-notice ready">
+                      <strong>{cloudConnectors.baidu.managedBy === 'environment' ? '由电脑环境配置' : '这台电脑已完成一次设置'}</strong>
+                      <span>扫码后只读取“我的应用数据/{cloudConnectors.baidu.appFolder}”中的媒体；播放仍通过这台电脑。</span>
+                    </div>
+                    {baiduAuthorization && <div className="baidu-authorization"><img src={baiduAuthorization.qrCodeDataUrl} alt="百度网盘授权二维码" /><div><strong>使用百度网盘 App 扫码授权</strong><span>用户码：{baiduAuthorization.userCode || '见授权页面'}</span><a href={baiduAuthorization.verificationUrl} target="_blank" rel="noreferrer">打开百度授权页面</a><small>Localis 正在等待授权结果，短暂断网会自动重试。</small><button type="button" onClick={() => void cancelBaiduLink()}>取消本次授权</button></div></div>}
+                    {!baiduAuthorization && <button className="cloud-primary-action" type="button" disabled={cloudBusy} onClick={() => void beginBaiduAuthorization()}>{cloudBusy ? '正在连接…' : '显示登录二维码'}</button>}
+                    {cloudConnectors.baidu.managedBy === 'computer' && cloudConnectors.baidu.canConfigure && <details className="cloud-advanced"><summary>更换百度开发者应用</summary><p>这只会清除当前电脑保存的应用身份，不会删除已经授权的网盘连接。</p><button className="cloud-danger-link" type="button" disabled={cloudBusy} onClick={() => void removeBaiduSettings()}>清除本机应用设置</button></details>}
+                  </>
+                ) : (
+                  <form className="cloud-setup-form" onSubmit={saveBaiduSettings}>
+                    <div className="cloud-notice warning"><strong>首次在这台电脑设置一次</strong><span>{cloudConnectors?.baidu.unavailableReason || '百度设备码需要你的百度开放平台应用身份。这里不是网盘账号密码，设置完成后日常使用只需扫码。'}</span></div>
+                    <label>百度 AppKey<input required aria-label="百度 AppKey" value={baiduSetup.appKey} onChange={(event) => setBaiduSetup({ ...baiduSetup, appKey: event.target.value })} autoComplete="off" /></label>
+                    <label>百度 SecretKey<input required aria-label="百度 SecretKey" type="password" value={baiduSetup.secretKey} onChange={(event) => setBaiduSetup({ ...baiduSetup, secretKey: event.target.value })} autoComplete="new-password" /></label>
+                    <label>应用目录<input required aria-label="百度应用目录" value={baiduSetup.appFolder} onChange={(event) => setBaiduSetup({ ...baiduSetup, appFolder: event.target.value })} placeholder="Localis" /></label>
+                    <small>凭据会加密保存在运行 Localis 的电脑，局域网设备无法调用这个设置接口。</small>
+                    <button className="add-button" disabled={cloudBusy || !cloudConnectors?.baidu.canConfigure}>{cloudBusy ? '正在保存…' : '保存并显示二维码'}</button>
+                  </form>
+                )}
                 {cloudError && <div className="inline-error folder-error" role="alert">{cloudError}</div>}
-                {!cloudConnectors?.baidu.available && <details className="cloud-advanced"><summary>为什么这里没有配置输入框？</summary><p>百度官方授权仍要求应用身份。Localis 只允许发布者在电脑端安全配置一次，绝不让普通用户在 Vision Pro 页面传输 SecretKey；公共版本还需要通过百度开放平台审核。</p></details>}
-                <div><button type="button" onClick={() => setCloudOpen(false)}>关闭</button><button className="add-button" disabled={cloudBusy || Boolean(baiduAuthorization) || !cloudConnectors?.baidu.available}>{baiduAuthorization ? '等待扫码…' : cloudBusy ? '正在连接…' : '显示登录二维码'}</button></div>
-              </form>
+                <div><button type="button" onClick={() => setCloudOpen(false)}>关闭</button></div>
+              </div>
             ) : (
               <div className="cloud-form">
                 <div className="cloud-login-hero">
                   <span className="cloud-provider-mark quark" aria-hidden="true">夸</span>
-                  <div><strong>扫码登录夸克网盘</strong><span>目标体验已经预留，但当前没有安全、公开且支持目录与 Range 播放的官方接口。</span></div>
+                  <div><strong>在电脑上登录夸克网盘</strong><span>使用夸克官方组件完成浏览器授权、搜索和完整下载；只有下载完成的影片才会出现在头显资料库。</span></div>
                 </div>
-                <div className="cloud-notice warning"><strong>暂不启用不安全的“假直连”</strong><span>{cloudConnectors?.quark.unavailableReason || '正在检查夸克网盘登录能力…'}</span></div>
-                <button className="cloud-unavailable-button" type="button" disabled>等待夸克官方开放直连接口</button>
+
+                {cloudConnectors?.quark.runtimeNotice && <div className="cloud-notice warning"><strong>Windows 运行环境提示</strong><span>{cloudConnectors.quark.runtimeNotice}</span></div>}
+                {!cloudConnectors ? (
+                  <div className="cloud-notice"><strong>正在检查电脑端组件…</strong><span>请稍候，Localis 正在读取夸克官方组件与授权状态。</span></div>
+                ) : !cloudConnectors.quark.installed ? (
+                  <div className="quark-step-card"><strong>① 安装官方电脑端组件</strong><span>Localis 会从夸克官方 GitHub 仓库下载组件，不读取浏览器 Cookie，也不经过第三方换票服务。</span><button className="cloud-primary-action" type="button" disabled={cloudBusy || cloudConnectors?.quark.operation?.state === 'running'} onClick={() => void startQuarkOperation('/api/cloud/quark/install', '官方组件安装失败，可重试')}>{cloudConnectors?.quark.operation?.state === 'running' ? '正在安装官方组件…' : '安装夸克官方组件'}</button></div>
+                ) : cloudConnectors.quark.accountState !== 'authenticated' ? (
+                  <div className="quark-step-card"><strong>② 在这台电脑授权</strong><span>{cloudConnectors.quark.accountMessage || '点击后会打开电脑浏览器；授权信息只由夸克官方组件保存。'}</span><button className="cloud-primary-action" type="button" disabled={cloudBusy || cloudConnectors.quark.operation?.state === 'running'} onClick={() => void startQuarkOperation('/api/cloud/quark/login', '无法开始夸克浏览器授权')}>{cloudConnectors.quark.accountState === 'authorizing' ? '等待浏览器授权…' : '打开电脑浏览器授权'}</button>
+                    {cloudConnectors.quark.authorizationUrl && /^https:\/\//.test(cloudConnectors.quark.authorizationUrl) && <a className="quark-auth-link" href={cloudConnectors.quark.authorizationUrl} target="_blank" rel="noreferrer">重新打开官方授权页面</a>}
+                    {cloudConnectors.quark.needsManualToken && <form className="quark-token-form" onSubmit={submitQuarkToken}><label>浏览器授权码<input required aria-label="夸克浏览器授权码" value={quarkToken} onChange={(event) => setQuarkToken(event.target.value)} autoComplete="one-time-code" /></label><button className="add-button" disabled={cloudBusy || !quarkToken.trim()}>提交授权码</button></form>}
+                  </div>
+                ) : (
+                  <div className="quark-step-card"><strong>③ 搜索并下载到电脑</strong><span>夸克官方组件目前提供关键词搜索，不提供网盘目录树。Localis 下载完整文件并校验后才加入资料库。</span>
+                    <form className="quark-search-form" onSubmit={searchQuark}><input required aria-label="搜索夸克网盘媒体" maxLength={50} value={quarkKeyword} onChange={(event) => { setQuarkKeyword(event.target.value); setQuarkSearched(false); }} placeholder="例如：VR180、电影名、音乐名" /><button className="add-button" disabled={cloudBusy || !quarkKeyword.trim()}>搜索视频和音频</button></form>
+                    {quarkSearched && quarkResults.length === 0 && <small>没有找到可下载的媒体；Localis 不会擅自改词重试。</small>}
+                    {quarkResults.length > 0 && <div className="quark-results" role="radiogroup" aria-label="夸克搜索结果">{quarkResults.map((result) => <label key={result.id} className={quarkSelectedId === result.id ? 'selected' : ''}><input type="radio" name="quark-result" value={result.id} checked={quarkSelectedId === result.id} onChange={() => setQuarkSelectedId(result.id)} /><span><strong>{result.fileName}</strong><small>{result.type === 'video' ? '视频' : '音频'} · {formatBytes(result.size)} · {new Date(result.modifiedAt).toLocaleDateString()}</small></span></label>)}</div>}
+                    {quarkResultTotal > quarkResults.length && <small>共找到 {quarkResultTotal} 项，官方接口在这里展示前 {quarkResults.length} 项。</small>}
+                    {quarkCheckAllUrl && /^https:\/\//.test(quarkCheckAllUrl) && <a className="quark-auth-link" href={quarkCheckAllUrl} target="_blank" rel="noreferrer">在夸克页面查看全部结果</a>}
+                    <button className="cloud-primary-action" type="button" disabled={cloudBusy || !quarkSelectedId || Boolean(quarkDownload && !['ready', 'failed', 'cancelled'].includes(quarkDownload.state))} onClick={() => void downloadQuarkResult()}>下载到电脑并加入资料库</button>
+                  </div>
+                )}
+
+                {cloudConnectors?.quark.operation?.message && <div className={`cloud-notice ${cloudConnectors.quark.operation.state === 'failed' ? 'warning' : 'ready'}`}><strong>{cloudConnectors.quark.operation.kind === 'install' ? '官方组件' : '浏览器授权'}</strong><span>{cloudConnectors.quark.operation.message}</span></div>}
+                {quarkDownload && <div className={`quark-download ${quarkDownload.state}`}><strong>{quarkDownload.fileName}</strong><span>{quarkDownload.message || quarkDownload.state}</span>{quarkDownload.totalBytes > 0 && <progress max={quarkDownload.totalBytes} value={quarkDownload.progressBytes} />}{quarkDownload.state === 'failed' && <button type="button" disabled={!quarkSelectedId || cloudBusy} onClick={() => void downloadQuarkResult()}>重试下载</button>}</div>}
+
                 <details className="cloud-advanced">
                   <summary>高级兼容：我已有本机 OpenList</summary>
                   <form className="cloud-form advanced-webdav-form" onSubmit={connectWebDav}>
-                    <div className="cloud-notice"><strong>仅连接你已经信任的本机只读桥接</strong><span>OpenList 必须只监听 127.0.0.1，并使用单独的 WebDAV Read 账号和 Native Proxy。Localis 不抓取夸克 Cookie，也不会自动安装会把登录票据交给第三方的驱动。</span></div>
+                    <div className="cloud-notice"><strong>仅连接你已经信任的本机只读桥接</strong><span>OpenList 必须只监听 127.0.0.1，并使用单独的 WebDAV Read 账号和 Native Proxy。Localis 不抓取夸克 Cookie，也不会把登录票据交给第三方。</span></div>
                     <label>OpenList WebDAV 地址<input required aria-label="OpenList WebDAV 地址" value={webDav.baseUrl} onChange={(event) => setWebDav({ ...webDav, baseUrl: event.target.value })} placeholder="http://127.0.0.1:5244/dav/" /></label>
                     <label>云盘挂载路径<input required aria-label="云盘挂载路径" value={webDav.rootPath} onChange={(event) => setWebDav({ ...webDav, rootPath: event.target.value })} placeholder="/Quark" /></label>
                     <label>只读用户名<input required aria-label="OpenList 只读用户名" value={webDav.username} onChange={(event) => setWebDav({ ...webDav, username: event.target.value })} autoComplete="username" /></label>

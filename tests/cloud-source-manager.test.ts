@@ -127,16 +127,163 @@ describe('CloudSourceManager', () => {
     try {
       const capabilities = manager.connectorCapabilities();
       expect(capabilities).toMatchObject({
-        baidu: { available: false, login: 'qr', appFolder: 'Localis' },
+        baidu: {
+          available: false,
+          configuration: 'missing',
+          setupRequired: true,
+          canConfigure: true,
+          login: 'qr',
+          appFolder: 'Localis',
+        },
         quark: { available: false, login: 'official-api-required', advancedWebDavAvailable: true },
       });
       expect(JSON.stringify(capabilities)).not.toMatch(/"(?:secretKey|appKey|accessToken|refreshToken|cookie)"/i);
       await expect(manager.startBaiduAuthorization()).rejects.toMatchObject({
         code: 'baidu_connector_unconfigured', status: 503,
       });
+
+      const config = configFor(root);
+      const library = new MediaLibrary(config, manager);
+      const auth = new PairingAuth(config);
+      const progress = new ProgressStore(config);
+      const transcodes = new TranscodeManager(config);
+      await Promise.all([auth.initialize(), progress.initialize(), transcodes.initialize()]);
+      try {
+        const api = createApiApp({ config, library, auth, progress, transcodes, clouds: manager });
+        await request(api).put('/api/cloud/baidu/settings').set('Host', 'localhost')
+          .send({ appKey: 'computer-app-key', secretKey: 'computer-secret', appFolder: 'Localis' }).expect(403);
+        await request(api).put('/api/cloud/baidu/settings').set('Host', 'localhost').set('Origin', 'https://attacker.example')
+          .send({ appKey: 'computer-app-key', secretKey: 'computer-secret', appFolder: 'Localis' }).expect(403);
+        const configured = await request(api).put('/api/cloud/baidu/settings').set('Host', 'localhost').set('Origin', 'http://localhost')
+          .send({ appKey: 'computer-app-key', secretKey: 'computer-secret', appFolder: 'Localis' }).expect(204);
+        expect(configured.text).toBe('');
+        const response = await request(api).get('/api/cloud/connectors').set('Host', 'localhost').expect(200);
+        expect(response.headers['cache-control']).toBe('no-store');
+        expect(response.body.baidu).toMatchObject({ available: true, managedBy: 'computer', appFolder: 'Localis' });
+        expect(JSON.stringify(response.body)).not.toMatch(/computer-app-key|computer-secret/);
+        const stored = await readFile(path.join(root, 'cloud-sources.json'), 'utf8');
+        expect(stored).not.toMatch(/computer-app-key|computer-secret/);
+        await request(api).delete('/api/cloud/baidu/settings').set('Host', 'localhost').set('Origin', 'http://localhost').expect(204);
+        expect(manager.connectorCapabilities().baidu).toMatchObject({ available: false, setupRequired: true });
+      } finally {
+        transcodes.shutdown();
+      }
     } finally {
       manager.shutdown();
     }
+  });
+
+  it('encrypts a one-time computer Baidu configuration, reloads v1 data and lets environment variables take precedence', async () => {
+    const observedAppKeys: string[] = [];
+    let origin = '';
+    const server = createServer((request, response) => {
+      const url = new URL(request.url!, origin);
+      if (url.pathname === '/oauth/2.0/device/code') {
+        observedAppKeys.push(String(url.searchParams.get('client_id')));
+        response.setHeader('Content-Type', 'application/json');
+        response.end(JSON.stringify({
+          device_code: `device-${observedAppKeys.length}`,
+          user_code: 'LOCALIS',
+          verification_url: `${origin}/authorize`,
+          qrcode_url: `${origin}/authorize?attempt=${observedAppKeys.length}`,
+          expires_in: 300,
+          interval: 5,
+        }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('mock Baidu server did not bind');
+    origin = `http://127.0.0.1:${address.port}`;
+
+    const root = await mkdtemp(path.join(os.tmpdir(), 'localis-baidu-computer-config-'));
+    temporaryDirectories.push(root);
+    await writeFile(path.join(root, 'cloud-sources.json'), JSON.stringify({ version: 1, sources: [] }));
+
+    const manager = new CloudSourceManager(configFor(root), { baiduOAuth: origin, baiduPan: origin });
+    await manager.initialize();
+    try {
+      await manager.configureBaiduConnector({
+        appKey: 'computer-app-key-private',
+        secretKey: 'computer-secret-private',
+        appFolder: 'ComputerLocalis',
+      });
+      expect(manager.connectorCapabilities()).toMatchObject({
+        baidu: {
+          available: true,
+          configuration: 'ready',
+          setupRequired: false,
+          managedBy: 'computer',
+          canConfigure: true,
+          appFolder: 'ComputerLocalis',
+        },
+      });
+      const stored = await readFile(path.join(root, 'cloud-sources.json'), 'utf8');
+      expect(JSON.parse(stored)).toMatchObject({ version: 2, connectors: { baidu: { appKey: { iv: expect.any(String), tag: expect.any(String), data: expect.any(String) } } } });
+      expect(stored).not.toContain('computer-app-key-private');
+      expect(stored).not.toContain('computer-secret-private');
+      expect(JSON.stringify(manager.connectorCapabilities())).not.toMatch(/app-key|secret-private/i);
+    } finally {
+      manager.shutdown();
+    }
+
+    const reloaded = new CloudSourceManager(configFor(root), { baiduOAuth: origin, baiduPan: origin });
+    await reloaded.initialize();
+    try {
+      await reloaded.startBaiduAuthorization();
+      expect(observedAppKeys).toEqual(['computer-app-key-private']);
+    } finally {
+      reloaded.shutdown();
+    }
+
+    const environmentConfig = {
+      ...configFor(root),
+      baiduAppKey: 'environment-app-key',
+      baiduSecretKey: 'environment-secret',
+      baiduAppFolder: 'EnvironmentLocalis',
+    };
+    const environment = new CloudSourceManager(environmentConfig, { baiduOAuth: origin, baiduPan: origin });
+    await environment.initialize();
+    try {
+      expect(environment.connectorCapabilities()).toMatchObject({
+        baidu: { available: true, configuration: 'ready', managedBy: 'environment', canConfigure: false, appFolder: 'EnvironmentLocalis' },
+      });
+      await environment.startBaiduAuthorization();
+      expect(observedAppKeys).toEqual(['computer-app-key-private', 'environment-app-key']);
+      await expect(environment.configureBaiduConnector({ appKey: 'ignored', secretKey: 'ignored' }))
+        .rejects.toMatchObject({ code: 'baidu_connector_managed_by_environment', status: 409 });
+      await expect(environment.removeBaiduConnector())
+        .rejects.toMatchObject({ code: 'baidu_connector_managed_by_environment', status: 409 });
+    } finally {
+      environment.shutdown();
+    }
+
+    const removable = new CloudSourceManager(configFor(root));
+    await removable.initialize();
+    try {
+      await removable.removeBaiduConnector();
+      expect(removable.connectorCapabilities().baidu).toMatchObject({
+        available: false, configuration: 'missing', setupRequired: true, canConfigure: true,
+      });
+      const stored = await readFile(path.join(root, 'cloud-sources.json'), 'utf8');
+      expect(stored).not.toContain('computer-app-key-private');
+      expect(stored).not.toContain('computer-secret-private');
+    } finally {
+      removable.shutdown();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+
+    const corruptRoot = await mkdtemp(path.join(os.tmpdir(), 'localis-corrupt-cloud-key-'));
+    temporaryDirectories.push(corruptRoot);
+    await writeFile(path.join(corruptRoot, 'cloud-secrets.key'), 'not-a-valid-32-byte-key');
+    const corrupt = new CloudSourceManager(configFor(corruptRoot));
+    await expect(corrupt.initialize()).rejects.toMatchObject({ code: 'cloud_encryption_key_invalid', status: 500 });
+    expect(await readFile(path.join(corruptRoot, 'cloud-secrets.key'), 'utf8')).toBe('not-a-valid-32-byte-key');
+    const retry = new CloudSourceManager(configFor(corruptRoot));
+    await expect(retry.initialize()).rejects.toMatchObject({ code: 'cloud_encryption_key_invalid', status: 500 });
   });
 
   it('scans a loopback OpenList WebDAV tree, proxies Range and caches encrypted credentials', async () => {
@@ -533,9 +680,25 @@ describe('CloudSourceManager', () => {
       });
 
       const stored = await readFile(path.join(root, 'cloud-sources.json'), 'utf8');
+      expect(stored).not.toContain('test-app-key');
       expect(stored).not.toContain('test-secret-key');
       expect(stored).not.toContain('access-token-private');
       expect(stored).not.toContain('refresh-token-private');
+
+      const legacy = JSON.parse(stored) as { version: number; sources: Array<{ appKey: unknown }> };
+      legacy.version = 1;
+      legacy.sources[0].appKey = 'test-app-key';
+      await writeFile(path.join(root, 'cloud-sources.json'), JSON.stringify(legacy));
+      manager.shutdown();
+      const migrated = new CloudSourceManager(config, { baiduOAuth: origin, baiduPan: origin }, { baiduPageDelayMs: 0 });
+      await migrated.initialize();
+      try {
+        const migratedStore = await readFile(path.join(root, 'cloud-sources.json'), 'utf8');
+        expect(migratedStore).not.toContain('test-app-key');
+        expect(JSON.parse(migratedStore)).toMatchObject({ version: 2, sources: [{ appKey: { iv: expect.any(String), tag: expect.any(String), data: expect.any(String) } }] });
+      } finally {
+        migrated.shutdown();
+      }
     } finally {
       manager.shutdown();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

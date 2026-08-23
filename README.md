@@ -23,8 +23,8 @@ Localis 是运行在电脑上的私有局域网媒体站。Vision Pro、Quest �
 - VR180、VR360、平面，Mono/SBS/TB、LR/RL，并可手动覆盖识别结果。
 - WebXR 内空间播放/暂停、前后 10 秒、退出和字幕面板。
 - 电脑端可用原生文件夹选择窗口添加媒体；完整路径输入仍作为降级入口。
-- 二维码优先的云盘登录界面：百度由电脑端配置官方应用身份后，普通用户只需扫码；夸克不安全的非官方直连默认禁用，已有 OpenList 仅保留为折叠的高级兼容入口。
-- 云盘凭据不发送给头显；电脑代理 Range，超分前先缓存源文件，再沿用同一条 FFmpeg 管线。
+- 电脑端云盘工作台：百度在电脑上一次加密保存应用身份，之后只需扫码；夸克使用官方组件完成电脑浏览器 OAuth、关键词搜索和完整下载入库。
+- 云盘凭据、百度 dlink 和夸克 FID 都不发送给头显；百度/WebDAV 由电脑代理或缓存，夸克只有完整下载并通过 ffprobe 的本地副本才会进入资料库。
 - 六位配对码、HMAC 签名 HttpOnly Cookie、尝试限速、Host/Origin 检查、路径隐藏和 HLS 文件名白名单。
 - 公网可信证书 + 私有 LAN DNS 的零安装 HTTPS 方案；证书私钥只保存在电脑上。
 
@@ -100,9 +100,17 @@ npm run start:local
 
 ### 夸克网盘
 
-Localis 的界面已经预留“扫码登录夸克网盘”，但截至 2026-08-23 暂不启用。夸克目前没有向 Localis 提供可公开集成的扫码/device OAuth、目录枚举和 HTTP Range 播放契约。Localis 不抓取 Cookie、不复制私有签名算法，也不会把不安全的第三方换票链路包装成“官方直连”。
+Localis 现在接入[夸克官方网盘 Skill/CLI](https://github.com/quark-clouddrive/quarkclouddrive_offical)，严格采用它公开的“电脑浏览器 OAuth → 关键词搜索 → 完整下载”契约：
 
-夸克发布了[官方网盘 Skill](https://github.com/quark-clouddrive/quarkclouddrive_offical)，但它目前使用电脑浏览器 OAuth，只提供搜索和完整下载到本机，Windows 原生也不受支持；它不是可供 Localis 嵌入的二维码流媒体 SDK。OpenList 的 QuarkTV 虽能显示二维码，但其当前源码会通过第三方明文 HTTP 服务交换登录票据，因此 Localis 不自动安装、不启动，也绝不使用真实账号测试该链路。
+1. 在电脑端点击“连接云盘 → 夸克网盘”。
+2. 首次点击“安装夸克官方组件”。Localis 只在这次明确操作后从夸克官方 GitHub 仓库下载组件到系统应用数据目录，不把运行时提交到本仓库。
+3. 点击“打开电脑浏览器授权”，在这台电脑完成夸克官方 OAuth；若官方流程返回手动授权地址，界面会显示链接和授权码输入框。
+4. 输入关键词搜索视频或音频，选择结果，再点“下载到电脑并加入资料库”。
+5. Localis 使用不透明选择 ID 隔离真实 FID，把下载写入受管暂存目录；只有唯一媒体文件完整落盘、路径校验和 ffprobe 全部成功后，才原子移动到持久资料库。Vision Pro/Quest/PICO 始终只读取这个电脑本地副本。
+
+官方 CLI 不提供个人网盘目录树，也不提供可嵌入的 HTTP Range 流媒体接口，因此 Localis 不伪造“浏览整个云盘”或“边下边播”。当前官方支持矩阵要求 Windows WSL；本机 WSL 因 Windows hypervisor 组件未生效而无法启动，所以 Localis 同时提供 Windows 本机兼容模式。该模式已实际通过官方组件 1.0.14 安装、版本探测和未登录协议响应，但真实账号 OAuth/下载仍需用户凭据验收，界面会明确显示这项运行环境提示。
+
+Localis 不抓取夸克 Cookie、不读取官方组件保存的 Token、不复制私有签名算法，也不使用 OpenList QuarkTV 当前通过第三方明文 HTTP 服务交换登录票据的链路。
 
 已经自行评估并部署 OpenList 的高级用户仍可展开“高级兼容：我已有本机 OpenList”，使用标准 WebDAV 只读桥接：
 
@@ -116,13 +124,14 @@ Localis 会拒绝非 loopback 地址和 URL 内嵌账号密码，也绝不跟随
 
 ### 百度网盘
 
-默认界面不再要求普通用户填写应用目录、AppKey、SecretKey、WebDAV 地址或密码。发布者在运行 Localis 的电脑端一次性配置经过百度审核的应用身份后，使用流程就是：
+百度设备码授权仍要求经过百度审核的开发者应用身份。Localis 现在把首次设置也放在电脑页面中：AppKey、SecretKey 和单层应用目录只在 localhost 提交一次并加密保存在系统应用数据目录；局域网设备看不到表单，也不能调用设置接口。之后日常使用就是：
 
 1. 在电脑端点击“连接云盘 → 百度网盘”。
-2. 点击“显示登录二维码”，使用百度网盘 App 扫码授权。
-3. 授权完成后 Localis 自动扫描 `/apps/应用目录名`，媒体随即出现在资料库。
+2. 首次使用填写百度开放平台应用信息并点“保存并显示二维码”；以后直接点“显示登录二维码”。
+3. 使用百度网盘 App 扫码授权。
+4. 授权完成后 Localis 自动扫描 `/apps/应用目录名`，媒体随即出现在资料库。
 
-电脑端发布者配置（普通用户看不到这些值）：
+部署者也可以继续用环境变量锁定应用身份，此时网页只显示扫码入口，不能覆盖电脑环境配置：
 
 ```powershell
 $env:LOCALIS_BAIDU_APP_KEY = '已审核应用的 AppKey'
@@ -131,7 +140,7 @@ $env:LOCALIS_BAIDU_APP_FOLDER = 'Localis'
 npm run start:local
 ```
 
-百度的设备码换取 Token 与后续刷新都要求 SecretKey，因此没有应用身份时 Localis 会明确禁用二维码按钮，而不会诱导用户在浏览器里发送秘密。面向公众发布时，共享 SecretKey 不能安全地编译进桌面程序；正式产品需要发布者维护只负责换票/刷新的 HTTPS OAuth Broker，并完成百度的公开应用审核。媒体列表、下载、Range、缓存、FFmpeg 转码和超分仍全部在用户电脑完成，不经过 Broker。详见[设备码授权文档](https://pan.baidu.com/union/doc/使用入门/接入授权/设备码模式授权/)、[创建应用](https://pan.baidu.com/union/doc/使用入门/创建应用/)与[权限和配额](https://pan.baidu.com/union/doc/使用入门/权限与配额/)。
+百度的设备码换取 Token 与后续刷新都要求 SecretKey，因此 Localis 不可能在没有开发者应用的情况下凭空提供二维码。面向公众发布时，共享 SecretKey 不能安全地编译进桌面程序；正式产品仍需发布者维护只负责换票/刷新的 HTTPS OAuth Broker，并完成百度公开应用审核。媒体列表、下载、Range、缓存、FFmpeg 转码和超分仍全部在用户电脑完成，不经过 Broker。详见[设备码授权文档](https://pan.baidu.com/union/doc/使用入门/接入授权/设备码模式授权/)、[创建应用](https://pan.baidu.com/union/doc/使用入门/创建应用/)与[权限和配额](https://pan.baidu.com/union/doc/使用入门/权限与配额/)。
 
 Access Token、Refresh Token 与用于刷新它们的 SecretKey 会以 AES-256-GCM 密文保存到仓库外的数据目录；加密密钥同样只保存在该操作系统用户的数据目录并限制文件权限。浏览器、日志、媒体 URL 与 FFmpeg 命令行都不会收到这些值或百度 dlink。
 
@@ -139,10 +148,11 @@ Access Token、Refresh Token 与用于刷新它们的 SecretKey 会以 AES-256-G
 
 ### 云盘播放行为
 
-- 可直接播放的云盘文件由电脑代理 HTTP Range；头显只访问 Localis URL。
-- 需要兼容转码或超分时，电脑先把完整源文件写入独立云缓存，再启动 FFmpeg，页面会显示缓存百分比。
+- 百度和 WebDAV 的可直接播放文件由电脑代理 HTTP Range；头显只访问 Localis URL。需要兼容转码或超分时，电脑先缓存完整源文件，再启动 FFmpeg。
+- 夸克文件在电脑管理页主动下载；下载中不会出现在媒体库，完成并校验后作为持久本地文件播放。头显请求永远不会触发夸克上游下载。
+- 夸克持久资料库同样遵守 `LOCALIS_CLOUD_CACHE_GB` 总容量边界，并额外保留 512 MiB 磁盘余量；达到上限时需要先在电脑上移走不再需要的文件。
 - 云缓存默认是 50 GB 硬上限，并预留文件系统可用空间；下载前检查声明大小，下载时继续逐字节计数，无法安全腾出空间时返回 `507`，不会“先写爆磁盘再清理”。
-- 缓存清单与 LRU 时间持久化到数据目录；崩溃残留的 `.part` 文件会在下次启动清理，删除云盘连接也会删除其缓存。默认只并行下载 1 个云文件，可用 `LOCALIS_MAX_CLOUD_DOWNLOADS` 调到 2。
+- 百度/WebDAV 缓存清单与 LRU 时间持久化到数据目录；夸克崩溃残留的 `.part` 文件会在下次启动清理。夸克始终一次只下载一个文件；其他云缓存默认并行 1 个，可用 `LOCALIS_MAX_CLOUD_DOWNLOADS` 调到 2。
 - 首版只读，不提供上传、删除、移动或分享操作。
 
 ## Vision Pro 零安装 HTTPS
@@ -199,6 +209,8 @@ npm run start:local
 | `LOCALIS_CACHE_GB` | HLS 缓存容量上限 | `20` |
 | `LOCALIS_CLOUD_CACHE_GB` | 云盘源文件缓存上限 | `50` |
 | `LOCALIS_MAX_CLOUD_DOWNLOADS` | 同时下载的云盘源文件数，只允许 `1` 或 `2` | `1` |
+| `LOCALIS_QUARK_BASH` | 夸克官方安装器使用的 Bash 路径 | Windows 自动查找 Git Bash |
+| `LOCALIS_QUARK_GIT` | 下载/更新夸克官方仓库使用的 Git 可执行文件 | `git` |
 | `LOCALIS_ENCODER` | 强制 `h264_nvenc`、`h264_mf` 或 `libx264` | 实际探测 |
 | `LOCALIS_TLS_CERT` / `LOCALIS_TLS_KEY` | 自备证书链与私钥 | 自动读取数据目录下的 `tls` |
 | `LOCALIS_ALLOWED_HOSTS` | 额外允许的 Host，逗号分隔 | 本机/LAN/可信域名 |
@@ -214,7 +226,7 @@ npm test
 npm run build
 ```
 
-当前自动化为 11 个文件、51 项测试，覆盖扫描与路径隐藏、配对、Range、字幕、原生选择器协议、Safari/Chromium HLS 分流、四档电脑端超分规划、SBS/TB 眼间隔离、H.264 Level 5.2 安全范围、真实 FFmpeg HLS、任务租约与回收、硬配额缓存、OpenList WebDAV、二维码优先界面，以及百度官方 OAuth/分页/Range 协议模拟。生产构建还在真实 Chromium 中验证了 hls.js 连续播放、1600×900 标准档、1920×1080 高档、设备端超分画布为 0、百度默认 0 个凭据输入框、夸克高级入口默认折叠、局域网只读管理边界与控制台无错误。
+当前自动化为 12 个文件、58 项测试，覆盖扫描与路径隐藏、配对、Range、字幕、原生选择器协议、Safari/Chromium HLS 分流、四档电脑端超分规划、SBS/TB 眼间隔离、H.264 Level 5.2 安全范围、真实 FFmpeg HLS、任务租约与回收、硬配额缓存、OpenList WebDAV、百度电脑端加密设置与 OAuth/分页/Range 协议模拟，以及夸克官方 CLI 的版本门禁、artifact、流式进度、不透明结果、完整下载、容量监控、ffprobe 与原子入库。生产构建还在真实 Chromium 中验证了云盘弹窗布局、百度首次设置、夸克安装后授权入口、LAN 页面无云盘按钮、LAN 管理 API 返回 403 与控制台无错误。
 
 详细记录见 [测试报告](./docs/TEST_REPORT.md)，真机步骤见 [头显验收清单](./docs/HEADSET_ACCEPTANCE.md)。真实 Vision Pro/Quest/PICO、真实夸克账户与真实百度账号仍需由拥有这些设备和凭据的用户完成清单，项目不会把模拟结果冒充真机结果。
 

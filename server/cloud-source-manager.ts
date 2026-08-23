@@ -20,6 +20,28 @@ interface EncryptedSecret {
   data: string;
 }
 
+interface StoredBaiduConnector {
+  appKey: EncryptedSecret;
+  secretKey: EncryptedSecret;
+  appFolder: string;
+  configuredAt: string;
+}
+
+interface StoredCloudState {
+  version?: number;
+  connectors?: {
+    baidu?: StoredBaiduConnector;
+  };
+  sources?: StoredCloudSource[];
+}
+
+interface EffectiveBaiduConnector {
+  appKey: string;
+  secretKey: string;
+  appFolder: string;
+  managedBy: 'environment' | 'computer';
+}
+
 interface StoredSourceBase {
   id: string;
   provider: CloudProvider;
@@ -37,7 +59,7 @@ interface StoredWebDavSource extends StoredSourceBase {
 
 interface StoredBaiduSource extends StoredSourceBase {
   kind: 'baidu-official';
-  appKey: string;
+  appKey: EncryptedSecret | string;
   secretKey: EncryptedSecret;
   accessToken: EncryptedSecret;
   refreshToken: EncryptedSecret;
@@ -68,6 +90,10 @@ export interface BaiduAuthorizationView {
 export interface CloudConnectorCapabilities {
   baidu: {
     available: boolean;
+    configuration: 'ready' | 'missing' | 'invalid';
+    setupRequired: boolean;
+    managedBy?: 'environment' | 'computer';
+    canConfigure: boolean;
     login: 'qr';
     appFolder: string;
     activeAuthorization?: BaiduAuthorizationView;
@@ -277,6 +303,8 @@ export class CloudSourceManager {
   private readonly localizedMetadata = new Map<string, Promise<Partial<MediaItem>>>();
   private readonly pendingBaidu = new Map<string, PendingBaiduAuthorization>();
   private readonly baiduDlinks = new Map<string, { url: string; expiresAt: number }>();
+  private baiduConnector?: StoredBaiduConnector;
+  private baiduConnectorInvalid = false;
   private readonly refreshPromises = new Map<string, Promise<string>>();
   private readonly persistenceRequired = new Set<string>();
   private readonly cacheRecords = new Map<string, CloudCacheRecord>();
@@ -316,12 +344,34 @@ export class CloudSourceManager {
   async initialize() {
     await mkdir(this.cacheRoot, { recursive: true });
     this.encryptionKey = await this.loadEncryptionKey();
+    let migratedPlaintextAppKey = false;
     try {
-      const stored = JSON.parse(await readFile(this.storePath, 'utf8')) as { sources?: StoredCloudSource[] };
-      for (const source of stored.sources ?? []) this.sources.set(source.id, source);
+      const stored = JSON.parse(await readFile(this.storePath, 'utf8')) as StoredCloudState;
+      for (const source of stored.sources ?? []) {
+        if (source.kind === 'baidu-official' && typeof source.appKey === 'string') {
+          source.appKey = this.encrypt(this.validateBaiduAppKey(source.appKey));
+          migratedPlaintextAppKey = true;
+        }
+        this.sources.set(source.id, source);
+      }
+      if (stored.connectors?.baidu) {
+        this.baiduConnector = stored.connectors.baidu;
+        try {
+          this.decrypt(this.baiduConnector.appKey);
+          this.decrypt(this.baiduConnector.secretKey);
+          this.validateBaiduCredentials({
+            appKey: this.decrypt(this.baiduConnector.appKey),
+            secretKey: this.decrypt(this.baiduConnector.secretKey),
+            appFolder: this.baiduConnector.appFolder,
+          });
+        } catch {
+          this.baiduConnectorInvalid = true;
+        }
+      }
     } catch {
       // Cloud sources are optional on first run.
     }
+    if (migratedPlaintextAppKey) await this.save();
     await this.loadCacheManifest();
   }
 
@@ -372,22 +422,36 @@ export class CloudSourceManager {
   }
 
   private async loadEncryptionKey() {
-    try {
-      const key = Buffer.from((await readFile(this.keyPath, 'utf8')).trim(), 'base64');
-      if (key.length !== 32) throw new Error('invalid key length');
-      return key;
-    } catch {
-      const key = randomBytes(32);
-      await writeFile(this.keyPath, key.toString('base64'), { mode: 0o600, flag: 'wx' }).catch(async (error: NodeJS.ErrnoException) => {
-        if (error.code !== 'EEXIST') throw error;
-      });
-      await chmod(this.keyPath, 0o600).catch(() => undefined);
+    const readPersisted = async () => {
+      let encoded: string;
       try {
-        const persisted = Buffer.from((await readFile(this.keyPath, 'utf8')).trim(), 'base64');
-        return persisted.length === 32 ? persisted : key;
-      } catch {
-        return key;
+        encoded = (await readFile(this.keyPath, 'utf8')).trim();
+      } catch (error) {
+        throw error;
       }
+      const key = Buffer.from(encoded, 'base64');
+      if (key.length !== 32 || key.toString('base64') !== encoded) {
+        throw new CloudSourceError(
+          'cloud_encryption_key_invalid',
+          '云盘加密密钥文件已损坏。请先备份数据目录并恢复 cloud-secrets.key，Localis 不会用临时密钥覆盖现有数据。',
+          500,
+        );
+      }
+      return key;
+    };
+    try {
+      return await readPersisted();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const key = randomBytes(32);
+    try {
+      await writeFile(this.keyPath, key.toString('base64'), { mode: 0o600, flag: 'wx' });
+      await chmod(this.keyPath, 0o600).catch(() => undefined);
+      return key;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      return readPersisted();
     }
   }
 
@@ -404,11 +468,134 @@ export class CloudSourceManager {
     return Buffer.concat([decipher.update(Buffer.from(value.data, 'base64')), decipher.final()]).toString('utf8');
   }
 
+  private validateBaiduCredentials(input: { appKey: unknown; secretKey: unknown; appFolder: unknown }) {
+    if (typeof input.appKey !== 'string' || typeof input.secretKey !== 'string' || typeof input.appFolder !== 'string') {
+      throw new CloudSourceError('invalid_baidu_app', '请填写有效的百度 AppKey、SecretKey 和单层应用目录名称。');
+    }
+    const appKey = this.validateBaiduAppKey(input.appKey);
+    const secretKey = input.secretKey.trim();
+    const appFolder = input.appFolder.trim().replace(/^\/+|\/+$/g, '');
+    if (!secretKey || secretKey.length > 512 || /[\0-\x1f\x7f]/.test(secretKey)
+      || !appFolder || appFolder.length > 100 || appFolder.includes('..') || /[\\/\0-\x1f\x7f]/.test(appFolder)) {
+      throw new CloudSourceError('invalid_baidu_app', '请填写有效的百度 AppKey、SecretKey 和单层应用目录名称。');
+    }
+    return { appKey, secretKey, appFolder };
+  }
+
+  private validateBaiduAppKey(value: unknown) {
+    if (typeof value !== 'string') throw new CloudSourceError('invalid_baidu_app', '百度 AppKey 格式无效。');
+    const appKey = value.trim();
+    if (!appKey || appKey.length > 256 || /[\0-\x1f\x7f]/.test(appKey)) {
+      throw new CloudSourceError('invalid_baidu_app', '百度 AppKey 格式无效。');
+    }
+    return appKey;
+  }
+
+  private baiduSourceAppKey(source: StoredBaiduSource) {
+    return this.validateBaiduAppKey(typeof source.appKey === 'string' ? source.appKey : this.decrypt(source.appKey));
+  }
+
+  private hasEnvironmentBaiduConfiguration() {
+    return Boolean(this.config.baiduAppKey?.trim() || this.config.baiduSecretKey?.trim());
+  }
+
+  private effectiveBaiduConnector(): EffectiveBaiduConnector | undefined {
+    if (this.hasEnvironmentBaiduConfiguration()) {
+      try {
+        return {
+          ...this.validateBaiduCredentials({
+            appKey: this.config.baiduAppKey,
+            secretKey: this.config.baiduSecretKey,
+            appFolder: this.config.baiduAppFolder || 'Localis',
+          }),
+          managedBy: 'environment',
+        };
+      } catch {
+        throw new CloudSourceError(
+          'baidu_connector_invalid',
+          '电脑环境变量中的百度应用配置不完整或无效，请同时检查 LOCALIS_BAIDU_APP_KEY 和 LOCALIS_BAIDU_SECRET_KEY。',
+          503,
+        );
+      }
+    }
+    if (!this.baiduConnector) return undefined;
+    if (this.baiduConnectorInvalid) {
+      throw new CloudSourceError('baidu_connector_invalid', '电脑上保存的百度应用配置无法解密，请重新配置。', 503);
+    }
+    try {
+      return {
+        ...this.validateBaiduCredentials({
+          appKey: this.decrypt(this.baiduConnector.appKey),
+          secretKey: this.decrypt(this.baiduConnector.secretKey),
+          appFolder: this.baiduConnector.appFolder,
+        }),
+        managedBy: 'computer',
+      };
+    } catch {
+      this.baiduConnectorInvalid = true;
+      throw new CloudSourceError('baidu_connector_invalid', '电脑上保存的百度应用配置无法解密，请重新配置。', 503);
+    }
+  }
+
+  async configureBaiduConnector(input: { appKey: unknown; secretKey: unknown; appFolder?: unknown }) {
+    if (this.hasEnvironmentBaiduConfiguration()) {
+      throw new CloudSourceError(
+        'baidu_connector_managed_by_environment',
+        '百度应用由电脑环境变量管理，请修改环境变量并重启 Localis。',
+        409,
+      );
+    }
+    const normalized = this.validateBaiduCredentials({ ...input, appFolder: input.appFolder ?? 'Localis' });
+    const previous = this.baiduConnector;
+    const previousInvalid = this.baiduConnectorInvalid;
+    this.baiduConnector = {
+      appKey: this.encrypt(normalized.appKey),
+      secretKey: this.encrypt(normalized.secretKey),
+      appFolder: normalized.appFolder,
+      configuredAt: new Date().toISOString(),
+    };
+    this.baiduConnectorInvalid = false;
+    try {
+      await this.save();
+    } catch (error) {
+      this.baiduConnector = previous;
+      this.baiduConnectorInvalid = previousInvalid;
+      throw error;
+    }
+    this.pendingBaidu.clear();
+  }
+
+  async removeBaiduConnector() {
+    if (this.hasEnvironmentBaiduConfiguration()) {
+      throw new CloudSourceError(
+        'baidu_connector_managed_by_environment',
+        '百度应用由电脑环境变量管理，请修改环境变量并重启 Localis。',
+        409,
+      );
+    }
+    const previous = this.baiduConnector;
+    const previousInvalid = this.baiduConnectorInvalid;
+    this.baiduConnector = undefined;
+    this.baiduConnectorInvalid = false;
+    try {
+      await this.save();
+    } catch (error) {
+      this.baiduConnector = previous;
+      this.baiduConnectorInvalid = previousInvalid;
+      throw error;
+    }
+    this.pendingBaidu.clear();
+  }
+
   private async save() {
     const operation = this.saveQueue.then(async () => {
       const temporary = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
       try {
-        await writeFile(temporary, JSON.stringify({ version: 1, sources: [...this.sources.values()] }, null, 2), { mode: 0o600 });
+        await writeFile(temporary, JSON.stringify({
+          version: 2,
+          connectors: this.baiduConnector ? { baidu: this.baiduConnector } : {},
+          sources: [...this.sources.values()],
+        }, null, 2), { mode: 0o600 });
         await rename(temporary, this.storePath);
         await chmod(this.storePath, 0o600).catch(() => undefined);
       } finally {
@@ -474,19 +661,34 @@ export class CloudSourceManager {
 
   connectorCapabilities(): CloudConnectorCapabilities {
     this.pruneBaiduAuthorizations();
-    const baiduAvailable = Boolean(this.config.baiduAppKey?.trim() && this.config.baiduSecretKey?.trim());
-    const activeAuthorization = baiduAvailable
-      ? [...this.pendingBaidu.values()].find((pending) => pending.appKey === this.config.baiduAppKey?.trim())
+    let baiduConnector: EffectiveBaiduConnector | undefined;
+    let configuration: 'ready' | 'missing' | 'invalid' = 'missing';
+    try {
+      baiduConnector = this.effectiveBaiduConnector();
+      if (baiduConnector) configuration = 'ready';
+    } catch {
+      configuration = 'invalid';
+    }
+    const activeAuthorization = baiduConnector
+      ? [...this.pendingBaidu.values()].find((pending) => pending.appKey === baiduConnector.appKey && pending.appFolder === baiduConnector.appFolder)
       : undefined;
     return {
       baidu: {
-        available: baiduAvailable,
+        available: configuration === 'ready',
+        configuration,
+        setupRequired: configuration !== 'ready',
+        managedBy: this.hasEnvironmentBaiduConfiguration()
+          ? 'environment'
+          : this.baiduConnector ? 'computer' : undefined,
+        canConfigure: !this.hasEnvironmentBaiduConfiguration(),
         login: 'qr',
-        appFolder: this.config.baiduAppFolder?.trim() || 'Localis',
+        appFolder: baiduConnector?.appFolder || this.baiduConnector?.appFolder || this.config.baiduAppFolder?.trim() || 'Localis',
         activeAuthorization: activeAuthorization ? this.baiduAuthorizationView(activeAuthorization) : undefined,
-        unavailableReason: baiduAvailable
+        unavailableReason: configuration === 'ready'
           ? undefined
-          : '这个 Localis 构建尚未配置已审核的百度网盘应用，因此不能安全地代替用户发起扫码登录。',
+          : configuration === 'invalid'
+            ? '电脑上的百度应用配置不完整或无法解密，请重新配置。'
+            : '请先在这台电脑上完成一次百度开放平台应用配置；之后用户只需扫码登录。',
       },
       quark: {
         available: false,
@@ -632,21 +834,17 @@ export class CloudSourceManager {
     return this.summaries().find((candidate) => candidate.id === source.id)!;
   }
 
-  async startBaiduAuthorization(input: { name?: string; appFolder?: string; appKey?: string; secretKey?: string } = {}) {
+  async startBaiduAuthorization(input: { name?: string } = {}) {
     this.pruneBaiduAuthorizations();
-    const appKey = (input.appKey || this.config.baiduAppKey || '').trim();
-    const secretKey = (input.secretKey || this.config.baiduSecretKey || '').trim();
-    const appFolder = (input.appFolder || this.config.baiduAppFolder || 'Localis').trim().replace(/^\/+|\/+$/g, '');
-    if (!appKey || !secretKey) {
+    const connector = this.effectiveBaiduConnector();
+    if (!connector) {
       throw new CloudSourceError(
         'baidu_connector_unconfigured',
-        '这个 Localis 构建尚未接入已审核的百度网盘应用。发布者完成应用审核与服务器凭据配置后，用户即可只扫码登录。',
+        '请先在这台电脑上完成一次百度应用配置；之后用户即可只扫码登录。',
         503,
       );
     }
-    if (!appKey || !secretKey || !appFolder || appFolder.length > 100 || appFolder.includes('..') || /[\\/\0-\x1f]/.test(appFolder)) {
-      throw new CloudSourceError('invalid_baidu_app', '请填写有效的百度 AppKey、SecretKey 和单层应用目录名称。');
-    }
+    const { appKey, secretKey, appFolder } = connector;
     const reusable = [...this.pendingBaidu.values()].find((pending) => pending.appKey === appKey && pending.appFolder === appFolder);
     if (reusable) return this.baiduAuthorizationView(reusable);
     if (this.pendingBaidu.size >= 10) throw new CloudSourceError('too_many_baidu_sessions', '等待授权的百度会话过多，请稍后再试。', 429);
@@ -717,7 +915,7 @@ export class CloudSourceManager {
       provider: 'baidu',
       name: pending.name,
       rootPath: `/apps/${pending.appFolder}`,
-      appKey: pending.appKey,
+      appKey: this.encrypt(pending.appKey),
       secretKey: this.encrypt(pending.secretKey),
       accessToken: this.encrypt(body.access_token),
       refreshToken: this.encrypt(body.refresh_token),
@@ -747,7 +945,7 @@ export class CloudSourceManager {
       url.search = new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: this.decrypt(source.refreshToken),
-        client_id: source.appKey,
+        client_id: this.baiduSourceAppKey(source),
         client_secret: this.decrypt(source.secretKey),
       }).toString();
       const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });

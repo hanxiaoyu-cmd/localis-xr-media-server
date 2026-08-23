@@ -11,6 +11,7 @@ import { MediaLibrary } from './media-library';
 import { ProgressStore } from './progress-store';
 import { TranscodeManager } from './transcode-manager';
 import { CloudSourceManager } from './cloud-source-manager';
+import { QuarkDesktopConnector } from './quark-desktop-connector';
 
 function requestHostname(request: IncomingMessage) {
   try {
@@ -46,14 +47,16 @@ async function loadTls(config: Awaited<ReturnType<typeof loadConfig>>) {
 async function main() {
   const config = await loadConfig();
   const clouds = new CloudSourceManager(config);
+  const quark = new QuarkDesktopConnector(config);
   const library = new MediaLibrary(config, clouds);
   const auth = new PairingAuth(config);
   const progress = new ProgressStore(config);
   const transcodes = new TranscodeManager(config);
-  await Promise.all([auth.initialize(), progress.initialize(), transcodes.initialize(), clouds.initialize()]);
+  await Promise.all([auth.initialize(), progress.initialize(), transcodes.initialize(), clouds.initialize(), quark.initialize()]);
+  quark.setOnImported(() => library.scan());
   await library.initialize();
 
-  const api = createApiApp({ config, library, auth, progress, transcodes, clouds });
+  const api = createApiApp({ config, library, auth, progress, transcodes, clouds, quark });
   const proxy = httpProxy.createProxyServer({ target: config.frontendOrigin, ws: true, changeOrigin: false });
   proxy.on('proxyRes', (proxyResponse) => {
     Object.assign(proxyResponse.headers, {
@@ -126,6 +129,7 @@ async function main() {
   const shutdown = () => {
     transcodes.shutdown();
     clouds.shutdown();
+    quark.shutdown();
     proxy.close();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 5_000).unref();
