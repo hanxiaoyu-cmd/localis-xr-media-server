@@ -28,7 +28,7 @@ interface TranscodeStatus {
   generationState?: 'waiting' | 'processing' | 'complete' | 'failed';
   generationStage?: 'extracting' | 'enhancing' | 'encoding';
   enhancementBackend?: string;
-  strategy?: 'eager' | 'on-demand';
+  strategy?: 'eager' | 'on-demand' | 'precompute';
   seekable?: boolean;
 }
 
@@ -74,6 +74,18 @@ function generationStageLabel(stage?: TranscodeStatus['generationStage']) {
   return stage === 'extracting' ? '提取画面' : stage === 'enhancing' ? 'AI 重建' : stage === 'encoding' ? '输出兼容流' : '生成';
 }
 
+function enhancedPreparingStatus(level: ServerSuperResolutionLevel) {
+  return level === 'ai'
+    ? '电脑正在完整预处理 AI 清晰影片，完成后自动播放…'
+    : `正在由电脑生成${superResolutionLabel(level)}超分流…`;
+}
+
+function enhancedReadyStatus(level: ServerSuperResolutionLevel) {
+  return level === 'ai'
+    ? '电脑端 AI 清晰 · 已完整缓存'
+    : `电脑端${superResolutionLabel(level)}超分 · 可拖动`;
+}
+
 export function MediaPlayer({ mediaId }: { mediaId: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<XrVideoStage | undefined>(undefined);
@@ -107,7 +119,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
       setSuperResolution(level);
       const enhanced = response.item.kind === 'video' && level !== 'off';
       setTransport(enhanced || !response.item.directPlay ? 'hls' : 'direct');
-      setStatus(enhanced ? `正在由电脑生成${superResolutionLabel(level)}超分流…` : response.item.directPlay ? '原始文件直连' : '正在准备兼容流…');
+      setStatus(enhanced ? enhancedPreparingStatus(level) : response.item.directPlay ? '原始文件直连' : '正在准备兼容流…');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '媒体不存在');
     }
@@ -174,7 +186,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
             if (body.stage === 'cloud-cache') {
               const percent = body.totalBytes ? Math.min(99, Math.round((body.progressBytes || 0) / body.totalBytes * 100)) : undefined;
               setStatus(`正在从云盘缓存到电脑${percent === undefined ? '…' : ` ${percent}%`}`);
-            } else if (superResolution !== 'off') setStatus(`电脑正在生成${superResolutionLabel(superResolution)}超分流…`);
+            } else if (superResolution !== 'off') setStatus(enhancedPreparingStatus(superResolution));
             const idleLimit = body.stage === 'cloud-cache' ? 120_000 : 300_000;
             if (Date.now() - lastProgressAt > idleLimit) {
               throw new Error(body.stage === 'cloud-cache' ? '云盘缓存已连续两分钟没有进展，请检查云盘连接。' : '电脑端转码已连续五分钟没有进展，请检查 FFmpeg 与磁盘空间。');
@@ -188,7 +200,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
           if (!controller.signal.aborted) setServerEnhancement(transcodeStatus);
           if (hlsTransport === 'native') {
             video.src = hlsUrl;
-            setStatus(superResolution === 'off' ? 'Safari 原生 HLS 兼容流' : `电脑端${superResolutionLabel(superResolution)}超分 · 可拖动`);
+            setStatus(superResolution === 'off' ? 'Safari 原生 HLS 兼容流' : enhancedReadyStatus(superResolution));
           } else {
             const hls = new Hls({
               enableWorker: true,
@@ -204,7 +216,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
             hlsRef.current = hls;
             hls.loadSource(hlsUrl);
             hls.attachMedia(video);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => setStatus(superResolution === 'off' ? 'HLS 兼容流已就绪' : `电脑端${superResolutionLabel(superResolution)}超分 · 可拖动`));
+            hls.on(Hls.Events.MANIFEST_PARSED, () => setStatus(superResolution === 'off' ? 'HLS 兼容流已就绪' : enhancedReadyStatus(superResolution)));
             hls.on(Hls.Events.ERROR, (_event, info) => {
               if (info.fatal) setError(`HLS 播放失败：${info.details}`);
             });
@@ -323,7 +335,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
     const video = videoRef.current;
     const switchedPosition = resumePosition.current;
     const saved = switchedPosition ?? data?.progress?.position;
-    setStatus(transport === 'direct' ? '原始文件直连' : superResolution === 'off' ? '兼容流已就绪' : `电脑端${superResolutionLabel(superResolution)}超分 · 可拖动`);
+    setStatus(transport === 'direct' ? '原始文件直连' : superResolution === 'off' ? '兼容流已就绪' : enhancedReadyStatus(superResolution));
     if (video) setPlayback({
       paused: video.paused,
       currentTime: video.currentTime,
@@ -419,7 +431,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
     setError('');
     setSuperResolution(level);
     setTransport(level === 'off' && data?.item.directPlay ? 'direct' : 'hls');
-    setStatus(level === 'off' ? '正在切换原始画质…' : `正在由电脑生成${superResolutionLabel(level)}超分流…`);
+    setStatus(level === 'off' ? '正在切换原始画质…' : enhancedPreparingStatus(level));
   };
 
   const onMediaError = () => {
@@ -487,7 +499,9 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
   const playbackPercent = playbackDuration > 0 ? Math.min(100, Math.max(0, displayedTime / playbackDuration * 100)) : 0;
   const enhancementPercent = Math.min(100, Math.max(0, serverEnhancement?.progressPercent ?? 0));
   const activeEnhancementPercent = Math.min(100, Math.max(0, serverEnhancement?.activeSegmentPercent ?? 0));
-  const displayedEnhancementPercent = serverEnhancement?.generationState === 'processing'
+  const displayedEnhancementPercent = serverEnhancement?.strategy === 'precompute'
+    ? enhancementPercent
+    : serverEnhancement?.generationState === 'processing'
     ? activeEnhancementPercent
     : enhancementPercent;
   const enhancementPercentLabel = enhancementPercent > 0 && enhancementPercent < 1
@@ -500,6 +514,9 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
     : undefined;
   const enhancementEta = serverEnhancement?.activeEtaSeconds && serverEnhancement.activeEtaSeconds > 1
     ? `约 ${clock(serverEnhancement.activeEtaSeconds)}`
+    : undefined;
+  const precomputeEta = serverEnhancement?.etaSeconds && serverEnhancement.etaSeconds > 1
+    ? `约 ${clock(serverEnhancement.etaSeconds)}`
     : undefined;
 
   return (
@@ -521,11 +538,11 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
           onLoadedMetadata={onLoadedMetadata}
           onTimeUpdate={() => { saveProgress(false); if (scrubTargetRef.current === undefined) syncPlayback(); }}
           onPlay={syncPlayback}
-          onPlaying={() => { syncPlayback(); if (superResolution !== 'off') setStatus(`电脑端${superResolutionLabel(superResolution)}超分 · 可拖动`); }}
+          onPlaying={() => { syncPlayback(); if (superResolution !== 'off') setStatus(enhancedReadyStatus(superResolution)); }}
           onPause={() => { saveProgress(true); syncPlayback(); }}
           onVolumeChange={syncPlayback}
           onDurationChange={syncPlayback}
-          onSeeked={() => { scrubTargetRef.current = undefined; setScrubTarget(undefined); syncPlayback(); if (superResolution !== 'off') setStatus(`电脑端${superResolutionLabel(superResolution)}超分 · 可拖动`); }}
+          onSeeked={() => { scrubTargetRef.current = undefined; setScrubTarget(undefined); syncPlayback(); if (superResolution !== 'off') setStatus(enhancedReadyStatus(superResolution)); }}
           onEnded={() => { saveProgress(true); syncPlayback(); }}
           onError={onMediaError}
         >
@@ -543,12 +560,18 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
                     {serverEnhancement?.generationState === 'complete'
                       ? '缓存完成'
                       : serverEnhancement?.generationState === 'processing'
-                        ? `${generationStageLabel(serverEnhancement.generationStage)} ${clock(serverEnhancement.activeSegmentStartSeconds ?? displayedTime)} · ${activeEnhancementPercent.toFixed(0)}%${enhancementSpeed ? ` · ${enhancementSpeed}` : ''}${enhancementEta ? ` · ${enhancementEta}` : ''}`
+                        ? serverEnhancement.strategy === 'precompute'
+                          ? `整片预处理 ${enhancementPercentLabel}${enhancementSpeed ? ` · ${enhancementSpeed}` : ''}${precomputeEta ? ` · ${precomputeEta}` : ''}`
+                          : `${generationStageLabel(serverEnhancement.generationStage)} ${clock(serverEnhancement.activeSegmentStartSeconds ?? displayedTime)} · ${activeEnhancementPercent.toFixed(0)}%${enhancementSpeed ? ` · ${enhancementSpeed}` : ''}${enhancementEta ? ` · ${enhancementEta}` : ''}`
                         : `已缓存 ${serverEnhancement?.generatedSegments ?? 0} 段 · ${enhancementPercentLabel}${enhancementSpeed ? ` · ${enhancementSpeed}` : ''}`}
                   </strong>
                 </div>
                 <div className="enhancement-track" style={enhancementTrackStyle} role="progressbar" aria-label="电脑端超分生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(displayedEnhancementPercent)}><i /></div>
-                <small>{serverEnhancement?.strategy === 'on-demand' ? `${superResolution === 'ai' ? '神经网络在电脑显卡上逐帧重建并缓存；' : ''}整部影片可直接拖动，电脑会优先生成你跳到的位置。总缓存 ${enhancementPercentLabel}。` : '电脑正在准备完整兼容流。'}</small>
+                <small>{serverEnhancement?.strategy === 'precompute'
+                  ? 'AI 会先在电脑上处理并缓存整部影片；达到 100% 前不会向头显开放播放，完成后可流畅拖动。'
+                  : serverEnhancement?.strategy === 'on-demand'
+                    ? `整部影片可直接拖动；电脑会优先生成你跳到的位置。总缓存 ${enhancementPercentLabel}。`
+                    : '电脑正在准备完整兼容流。'}</small>
               </div>
             )}
             <div className="playback-control-row">
@@ -584,7 +607,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
           <label>投影<select value={item.projection} onChange={(event) => void updateMedia({ projection: event.target.value as PublicMediaItem['projection'] })}><option value="flat">平面</option><option value="equirect180">VR180</option><option value="equirect360">VR360</option></select></label>
           <label>立体布局<select value={item.stereo} onChange={(event) => void updateMedia({ stereo: event.target.value as PublicMediaItem['stereo'] })}><option value="mono">单目</option><option value="sbs">左右 SBS</option><option value="tb">上下 TB</option></select></label>
           <label>左右眼<select value={item.eyeOrder} disabled={item.stereo === 'mono'} onChange={(event) => void updateMedia({ eyeOrder: event.target.value as PublicMediaItem['eyeOrder'] })}><option value="lr">左 / 右</option><option value="rl">右 / 左</option></select></label>
-          <label>电脑端超分<select aria-label="电脑端超分" value={superResolution} disabled={item.kind !== 'video'} onChange={(event) => changeSuperResolution(event.target.value as ServerSuperResolutionLevel)}><option value="off">关闭（可直连时为原片）</option><option value="standard">标准 · 最多 1.25×</option><option value="high">高 · 最多 1.5×</option><option value="ultra">极致 · 最多 2×</option><option value="ai">AI 清晰 · Real-ESRGAN 2×（需缓冲）</option></select></label>
+          <label>电脑端超分<select aria-label="电脑端超分" value={superResolution} disabled={item.kind !== 'video'} onChange={(event) => changeSuperResolution(event.target.value as ServerSuperResolutionLevel)}><option value="off">关闭（可直连时为原片）</option><option value="standard">标准 · 最多 1.25×</option><option value="high">高 · 最多 1.5×</option><option value="ultra">极致 · 最多 2×</option><option value="ai">AI 清晰 · 完整预处理后播放</option></select></label>
           <label className="yaw-control">朝向<input aria-label="水平朝向" type="range" min="-3.15" max="3.15" step="0.05" value={item.yawOffset} onChange={(event) => void updateMedia({ yawOffset: Number(event.target.value) })} /></label>
           <button className="mode-button" onClick={() => void updateMedia({ yawOffset: 0 })}>重新居中</button>
           <button className="mode-button" disabled={superResolution !== 'off'} onClick={() => { directFailed.current = transport === 'direct'; setTransport(transport === 'direct' ? 'hls' : 'direct'); }}>{superResolution !== 'off' ? '超分由电脑流式输出' : transport === 'direct' ? '使用兼容流' : '尝试原文件'}</button>
@@ -593,7 +616,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
         <button className="xr-button" disabled={!xrSupported || enteringXr || item.kind !== 'video'} onClick={() => void enterXr()}>{enteringXr ? '正在进入…' : xrSupported ? '进入沉浸模式' : '此环境不可用 WebXR'}</button>
       </section>
 
-      {item.kind === 'video' && <p className="super-resolution-note">超分与锐化完全由运行 Localis 的电脑完成；Vision Pro、Quest 和 PICO 只接收标准 H.264 HLS 并负责显示。AI 清晰使用随 EXE 携带的 Real-ESRGAN/NCNN Vulkan 通用视频模型，按 1 秒分片生成并缓存；无需 Python、PyTorch 或 CUDA 环境。SBS/TB 与 VR360 暂使用其他档位，以避免眼间串色和环绕接缝。</p>}
+      {item.kind === 'video' && <p className="super-resolution-note">超分与锐化完全由运行 Localis 的电脑完成；Vision Pro、Quest 和 PICO 只接收标准 H.264 HLS 并负责显示。AI 清晰使用随项目携带的 Real-ESRGAN/NCNN Vulkan 通用视频模型，先完整生成并缓存整部影片，达到 100% 后才开放播放；无需 Python、PyTorch 或 CUDA 环境。SBS/TB 与 VR360 暂使用其他档位，以避免眼间串色和环绕接缝。</p>}
 
       <section className="media-details">
         <div><span>时长</span><strong>{clock(item.duration)}</strong></div>

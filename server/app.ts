@@ -500,7 +500,12 @@ export function createApiApp(deps: AppDependencies) {
         }
       }
       if (req.params.file === 'index.m3u8') {
-        if (item.sourceType !== 'local') {
+        // Repeated AI progress checks reuse the active job. The first request
+        // already holds the cloud-cache lease until precompute finishes; do
+        // not create one additional lease timer per second for a long movie.
+        job = item.sourceType !== 'local' ? transcodes.jobForItem(item, level) : undefined;
+        if (job?.state === 'failed') job = undefined;
+        if (item.sourceType !== 'local' && !job) {
           if (!clouds) throw new CloudSourceError('cloud_manager_unavailable', '云盘管理器尚未启动。', 503);
           const cacheJob = clouds.ensureCached(item);
           if (cacheJob.state === 'failed') throw new CloudSourceError(cacheJob.errorCode || 'cloud_cache_failed', cacheJob.error || '云盘缓存失败。', cacheJob.errorStatus || 502);
@@ -519,7 +524,7 @@ export function createApiApp(deps: AppDependencies) {
           }
         }
         try {
-          job = await transcodes.ensure(item, level);
+          if (!job) job = await transcodes.ensure(item, level);
         } catch (error) {
           if (!(error instanceof SourceChangedError) || item.sourceType !== 'local') throw error;
           await library.scan();
@@ -548,8 +553,17 @@ export function createApiApp(deps: AppDependencies) {
         releaseSegmentCloudLease?.();
         return res.status(404).json({ error: 'hls_asset_not_ready' });
       }
-      if (req.params.file === 'index.m3u8' && !await transcodes.waitForPlaylist(job, 5_000)) {
-        return res.status(202).set('Retry-After', '1').json({ state: job.state, stage: 'transcode', progressSeconds: job.progressSeconds });
+      transcodes.renew(job);
+      const playlistWaitMs = job.strategy === 'precompute' ? 0 : 5_000;
+      if (req.params.file === 'index.m3u8' && !await transcodes.waitForPlaylist(job, playlistWaitMs)) {
+        const status = transcodes.statusForItem(item, level);
+        return res.status(202).set('Retry-After', '1').json({
+          state: job.state,
+          stage: level === 'ai' ? 'ai-precompute' : 'transcode',
+          progressSeconds: status.progressSeconds,
+          progressPercent: status.progressPercent,
+          generationStage: status.generationStage,
+        });
       }
       const requestedFile = String(req.params.file);
       let asset: string | undefined;

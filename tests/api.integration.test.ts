@@ -224,17 +224,34 @@ describe('Localis API', () => {
       .toMatchObject({ width: sphericalPlan.outputWidth, height: sphericalPlan.outputHeight });
   });
 
-  it.runIf(process.platform === 'win32')('runs the bundled AI model and returns a seekable H.264 segment', async () => {
+  it.runIf(process.platform === 'win32')('precomputes every AI segment before publishing a playable HLS manifest', async () => {
     const health = await host(request(api).get('/api/health')).expect(200);
     expect(health.body.aiSuperResolution).toMatchObject({
       available: true,
       backend: 'Real-ESRGAN NCNN Vulkan',
     });
-    const item = deps.library.get(deps.library.list().find((candidate) => candidate.title === 'flat-demo')!.id)!;
+    const item = deps.library.get(deps.library.list().find((candidate) => candidate.title === 'seekable-long')!.id)!;
     const plan = serverSuperResolutionPlan(item, 'ai');
-    const playlist = await host(request(api).get(`/api/media/${item.id}/hls/ai/index.m3u8`)).expect(200);
-    expect(playlist.text).toContain('#EXT-X-TARGETDURATION:1');
-    expect(playlist.text.match(/#EXTINF:/g)).toHaveLength(Math.ceil(item.duration));
+    const firstManifest = await host(request(api).get(`/api/media/${item.id}/hls/ai/index.m3u8`)).expect(202);
+    expect(firstManifest.body).toMatchObject({ stage: 'ai-precompute', state: 'running' });
+    const runningJob = deps.transcodes.jobForItem(item, 'ai')!;
+    expect(runningJob).toMatchObject({ strategy: 'precompute', state: 'running' });
+    await expect(access(runningJob.playlistPath)).rejects.toThrow();
+    await host(request(api).get(`/api/media/${item.id}/hls/ai/seg_000000.ts`)).expect(404);
+
+    let playlist: request.Response | undefined;
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      const response = await host(request(api).get(`/api/media/${item.id}/hls/ai/index.m3u8`));
+      if (response.status === 200) {
+        playlist = response;
+        break;
+      }
+      expect(response.status).toBe(202);
+      await wait(250);
+    }
+    expect(playlist?.status).toBe(200);
+    expect(playlist?.text).toContain('#EXT-X-TARGETDURATION:4');
+    expect(playlist?.text.match(/#EXTINF:/g)).toHaveLength(Math.ceil(item.duration / 4));
 
     await host(request(api).get(`/api/media/${item.id}/hls/ai/seg_000000.ts`)).expect(200);
     const status = deps.transcodes.statusForItem(item, 'ai');
@@ -242,8 +259,11 @@ describe('Localis API', () => {
       state: 'ready',
       superResolution: 'ai',
       enhancementBackend: 'Real-ESRGAN NCNN Vulkan',
-      generatedSegments: 1,
-      strategy: 'on-demand',
+      generatedSegments: Math.ceil(item.duration / 4),
+      totalSegments: Math.ceil(item.duration / 4),
+      progressPercent: 100,
+      strategy: 'precompute',
+      seekable: true,
       plan: { outputWidth: plan.outputWidth, outputHeight: plan.outputHeight },
     });
     const job = deps.transcodes.jobForItem(item, 'ai')!;
@@ -261,8 +281,8 @@ describe('Localis API', () => {
       }),
       expect.objectContaining({ codec_name: 'aac' }),
     ]));
-    expect(Number(probe.format.duration)).toBeGreaterThanOrEqual(1);
-  }, 120_000);
+    expect(Number(probe.format.duration)).toBeGreaterThanOrEqual(4);
+  }, 180_000);
 
   it('publishes a full-duration VOD timeline immediately and generates a far seek segment first', async () => {
     const item = deps.library.get(deps.library.list().find((candidate) => candidate.title === 'seekable-long')!.id)!;

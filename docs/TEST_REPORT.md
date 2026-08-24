@@ -1,6 +1,6 @@
 # Localis 实际测试报告
 
-测试日期：2026-08-24（Asia/Shanghai）
+测试日期：2026-08-25（Asia/Shanghai）
 
 ## 环境
 
@@ -26,7 +26,7 @@
 | libx264 路径 | 18/18 通过 | 强制 `libx264` 后完整 API 集成测试通过，含远距离按需分片 |
 | 电脑端超分规划 | 9/9 通过 | 五档解析、绝不反向缩小、Level 5.2、安全像素率、SAR、SBS/TB 拆眼、360 接缝、AI 安全布局与 60 fps 上限 |
 | 标准档真实 HLS | 通过 | 1280×720 → 1600×900，按需 MPEG-TS 分片经 FFprobe 确认为 H.264/yuv420p，非关闭档强制电脑转码 |
-| AI 清晰真实 HLS | 通过 | 随包 Real-ESRGAN NCNN Vulkan 真实推理：1280×720 → 2560×1440，1 秒分片经 FFprobe 确认为 H.264/yuv420p + AAC，首段约 2 秒 |
+| AI 清晰完整预处理 | 通过 | 真实 12 秒样片先返回 `202 ai-precompute`，处理期间无播放清单且分片返回 404；三个 4 秒分片全部完成后才原子发布 HLS，FFprobe 确认为 2560×1440 H.264/yuv420p + AAC |
 | AI 中间色阶 | 通过 | JPEG 神经网络输出显式从 full range 转换为 limited range，修复首次回归发现的 yuvj420p 标记 |
 | 完整时长远距离 seek | 通过 | 12 秒三分片 VOD 清单立即返回；不请求片头，先请求最后一段并验证时间戳从 8 秒附近开始 |
 | 高档真实页面 | 通过 | 生产浏览器加载 `/hls/high/index.m3u8`，绿色播放器和超分缓存进度正确显示 |
@@ -81,7 +81,7 @@ AI SR: 1280x720 -> 2560x1440, 1-second segments, Real-ESRGAN NCNN Vulkan
 - 120 fps → 不超过 60 fps。
 - SBS 与 TB 每只眼独立缩放和锐化，滤镜图不会跨眼取样。
 - `off`、`standard`、`high`、`ultra`、`ai` 使用不同缓存键。
-- 旧 HLS 缓存不会污染 `v7-seekable-on-demand-ai-sr` 管线。
+- 旧 HLS 缓存不会污染 `v8-precomputed-ai-sr` 管线。
 - 两个同时转码槽被占满时返回 `503 + Retry-After`，释放后可重试。
 - 播放者持有 60 秒共享租约；页面放弃后由 15 秒清理器停止过期 FFmpeg，活跃请求不会被误杀。
 
@@ -129,7 +129,9 @@ AI SR: 1280x720 -> 2560x1440, 1-second segments, Real-ESRGAN NCNN Vulkan
 
 当前电脑端包含两条可验证路径：标准/高/极致使用空间缩放 + CAS，AI 清晰使用随包 Real-ESRGAN NCNN Vulkan 神经网络。当前测试证明电脑端模型与 HLS 输出有效，不等于 Vision Pro/Quest/PICO 真机已验收；发布真机或真实云盘兼容声明前，必须完成 [HEADSET_ACCEPTANCE.md](./HEADSET_ACCEPTANCE.md)。
 
-## 本次 Windows 产物
+## 上次 Windows 产物
+
+以下 EXE 是引入 AI 运行时后的上一轮可复现产物。本轮“AI 全片完成后才播放”的源码改动按项目约定没有重新打包，因此这些文件仍是旧的按需 AI 播放行为；下次明确发布版本时再统一重建并更新哈希。
 
 | 文件 | 大小 | SHA-256 |
 | --- | ---: | --- |

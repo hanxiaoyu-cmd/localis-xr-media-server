@@ -71,15 +71,23 @@ assert.equal(transcodeStatus.superResolution, 'standard');
 assert.equal(transcodeStatus.plan.outputWidth, 1600);
 assert.equal(transcodeStatus.plan.outputHeight, 900);
 
-const aiPlaylist = await fetch(`${baseUrl}/api/media/${media.id}/hls/ai/index.m3u8`, authenticated);
-assert.equal(aiPlaylist.status, 200, 'Packaged server did not create the AI HLS playlist');
-assert.match(await aiPlaylist.text(), /#EXT-X-TARGETDURATION:1/);
+let aiPlaylist;
+for (let attempt = 0; attempt < 30; attempt += 1) {
+  aiPlaylist = await fetch(`${baseUrl}/api/media/${media.id}/hls/ai/index.m3u8`, authenticated);
+  if (aiPlaylist.status === 200) break;
+  assert.equal(aiPlaylist.status, 202, 'Packaged AI precompute returned an unexpected state');
+  await new Promise((resolve) => setTimeout(resolve, 500));
+}
+assert.equal(aiPlaylist?.status, 200, 'Packaged server did not finish the full AI precompute');
+assert.match(await aiPlaylist.text(), /#EXT-X-TARGETDURATION:4/);
 const aiSegment = await fetch(`${baseUrl}/api/media/${media.id}/hls/ai/seg_000000.ts`, authenticated);
 assert.equal(aiSegment.status, 200);
 const aiSegmentBytes = (await aiSegment.arrayBuffer()).byteLength;
 assert.ok(aiSegmentBytes > 10_000, 'Bundled Real-ESRGAN returned an empty segment');
 const aiStatus = await fetch(`${baseUrl}/api/media/${media.id}/hls/ai/status`, authenticated).then((response) => response.json());
 assert.equal(aiStatus.enhancementBackend, 'Real-ESRGAN NCNN Vulkan');
+assert.equal(aiStatus.strategy, 'precompute');
+assert.equal(aiStatus.progressPercent, 100);
 assert.equal(aiStatus.plan.outputWidth, 2560);
 assert.equal(aiStatus.plan.outputHeight, 1440);
 

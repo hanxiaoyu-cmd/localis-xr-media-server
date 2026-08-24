@@ -20,7 +20,7 @@ export type JobState = 'preparing' | 'running' | 'ready' | 'failed';
 export class SourceChangedError extends Error {}
 export class TranscodeCapacityError extends Error {}
 
-export const TRANSCODE_CACHE_SCHEMA = 'v7-seekable-on-demand-ai-sr';
+export const TRANSCODE_CACHE_SCHEMA = 'v8-precomputed-ai-sr';
 
 export interface TranscodeJob {
   key: string;
@@ -40,7 +40,7 @@ export interface TranscodeJob {
   startedAt: string;
   lastAccessAt: number;
   leaseExpiresAt?: number;
-  strategy?: 'eager' | 'on-demand';
+  strategy?: 'eager' | 'on-demand' | 'precompute';
   durationSeconds?: number;
   segmentDurationSeconds?: number;
   totalSegments?: number;
@@ -59,7 +59,7 @@ export interface TranscodeJob {
 export const TRANSCODE_ACTIVITY_LEASE_MS = 60_000;
 export const TRANSCODE_IDLE_SWEEP_INTERVAL_MS = 15_000;
 export const ON_DEMAND_SEGMENT_SECONDS = 4;
-export const AI_ON_DEMAND_SEGMENT_SECONDS = 1;
+export const AI_PRECOMPUTE_SEGMENT_SECONDS = 4;
 const AI_MODEL_NAME = 'localis-general-x4';
 const AI_BACKEND_NAME = 'Real-ESRGAN NCNN Vulkan';
 
@@ -290,6 +290,9 @@ export class TranscodeManager {
   private async prepare(item: MediaItem, mode: TranscodeMode, superResolution: ServerSuperResolutionLevel, key: string): Promise<TranscodeJob> {
     const directory = path.join(this.config.cacheDir, 'hls', key);
     const playlistPath = path.join(directory, 'index.m3u8');
+    if (item.kind === 'video' && isAiSuperResolutionLevel(superResolution) && item.duration > 0) {
+      return this.prepareAiPrecomputed(item, mode, superResolution, key, directory, playlistPath);
+    }
     if (item.kind === 'video' && superResolution !== 'off' && item.duration > 0) {
       return this.prepareOnDemand(item, mode, superResolution, key, directory, playlistPath);
     }
@@ -344,9 +347,7 @@ export class TranscodeManager {
     directory: string,
     playlistPath: string,
   ) {
-    const segmentSeconds = isAiSuperResolutionLevel(superResolution)
-      ? AI_ON_DEMAND_SEGMENT_SECONDS
-      : ON_DEMAND_SEGMENT_SECONDS;
+    const segmentSeconds = ON_DEMAND_SEGMENT_SECONDS;
     const manifest = onDemandPlaylist(item.duration, segmentSeconds);
     await mkdir(directory, { recursive: true });
     let cachedPlaylist = '';
@@ -402,6 +403,105 @@ export class TranscodeManager {
       processingWallSeconds: 0,
     };
     this.jobs.set(key, job);
+    return job;
+  }
+
+  private async prepareAiPrecomputed(
+    item: MediaItem,
+    mode: TranscodeMode,
+    superResolution: ServerSuperResolutionLevel,
+    key: string,
+    directory: string,
+    playlistPath: string,
+  ) {
+    const segmentSeconds = AI_PRECOMPUTE_SEGMENT_SECONDS;
+    const manifest = onDemandPlaylist(item.duration, segmentSeconds);
+    await mkdir(directory, { recursive: true });
+    let cachedPlaylist = '';
+    try { cachedPlaylist = await readFile(playlistPath, 'utf8'); } catch { /* first request */ }
+
+    if (cachedPlaylist === manifest.playlist && await completePlaylist(directory, cachedPlaylist)) {
+      const completedSegmentIndexes = new Set(Array.from({ length: manifest.totalSegments }, (_, index) => index));
+      const now = Date.now();
+      const cached: TranscodeJob = {
+        key,
+        itemId: item.id,
+        directory,
+        playlistPath,
+        mode,
+        superResolution,
+        superResolutionPlan: serverSuperResolutionPlan(item, superResolution),
+        encoder: this.encoder,
+        state: 'ready',
+        progressSeconds: item.duration,
+        startedAt: new Date().toISOString(),
+        lastAccessAt: now,
+        leaseExpiresAt: now + TRANSCODE_ACTIVITY_LEASE_MS,
+        strategy: 'precompute',
+        durationSeconds: item.duration,
+        segmentDurationSeconds: segmentSeconds,
+        totalSegments: manifest.totalSegments,
+        completedSegmentIndexes,
+        segmentInflight: new Map(),
+        segmentProcesses: new Map(),
+        segmentProgressSeconds: new Map(),
+        segmentStages: new Map(),
+        processedMediaSeconds: 0,
+        processingWallSeconds: 0,
+      };
+      this.jobs.set(key, cached);
+      return cached;
+    }
+
+    // A playable manifest is published only after every neural segment exists.
+    // Existing completed segments can resume after a restart, but a partial
+    // timeline must never reach Safari or hls.js.
+    await rm(playlistPath, { force: true });
+    const completedSegmentIndexes = new Set<number>();
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const match = entry.isFile() && entry.name.match(/^seg_(\d{6})\.ts$/);
+      if (!match) continue;
+      const index = Number(match[1]);
+      if (index < manifest.totalSegments && (await stat(path.join(directory, entry.name))).size > 0) {
+        completedSegmentIndexes.add(index);
+      }
+    }
+    const progressSeconds = [...completedSegmentIndexes]
+      .reduce((total, index) => total + Math.min(segmentSeconds, item.duration - index * segmentSeconds), 0);
+
+    await this.reclaimExpiredJobsForCapacity();
+    if (this.activeWorkCount() >= this.config.maxTranscodes) {
+      throw new TranscodeCapacityError('当前已有转码任务，请稍后重试');
+    }
+    const now = Date.now();
+    const job: TranscodeJob = {
+      key,
+      itemId: item.id,
+      directory,
+      playlistPath,
+      mode,
+      superResolution,
+      superResolutionPlan: serverSuperResolutionPlan(item, superResolution),
+      encoder: this.encoder,
+      state: 'running',
+      progressSeconds,
+      startedAt: new Date().toISOString(),
+      lastAccessAt: now,
+      leaseExpiresAt: now + TRANSCODE_ACTIVITY_LEASE_MS,
+      strategy: 'precompute',
+      durationSeconds: item.duration,
+      segmentDurationSeconds: segmentSeconds,
+      totalSegments: manifest.totalSegments,
+      completedSegmentIndexes,
+      segmentInflight: new Map(),
+      segmentProcesses: new Map(),
+      segmentProgressSeconds: new Map(),
+      segmentStages: new Map(),
+      processedMediaSeconds: 0,
+      processingWallSeconds: 0,
+    };
+    this.jobs.set(key, job);
+    this.launchAiPrecompute(job, item, manifest.playlist);
     return job;
   }
 
@@ -586,7 +686,7 @@ export class TranscodeManager {
       throw new ServerSuperResolutionUnavailableError(this.aiSuperResolutionReason || 'AI 超分不可用。');
     }
 
-    const start = index * (job.segmentDurationSeconds ?? AI_ON_DEMAND_SEGMENT_SECONDS);
+    const start = index * (job.segmentDurationSeconds ?? AI_PRECOMPUTE_SEGMENT_SECONDS);
     const duration = segmentDuration(job, index);
     const fps = Math.min(60, Math.max(1, item.frameRate || 30));
     const expectedFrames = Math.max(1, Math.round(duration * fps));
@@ -734,14 +834,52 @@ export class TranscodeManager {
     throw lastError ?? new Error('超分分片生成失败');
   }
 
+  private launchAiPrecompute(job: TranscodeJob, item: MediaItem, playlist: string) {
+    void (async () => {
+      try {
+        for (let index = 0; index < (job.totalSegments ?? 0); index += 1) {
+          if (job.cancelled) throw new Error('AI 完整预处理已停止');
+          if (job.completedSegmentIndexes?.has(index)) continue;
+          const targetPath = path.join(job.directory, `seg_${String(index).padStart(6, '0')}.ts`);
+          await this.encodeAiOnDemandSegment(job, item, index, targetPath);
+          job.completedSegmentIndexes?.add(index);
+          const processed = segmentDuration(job, index);
+          job.processedMediaSeconds = (job.processedMediaSeconds ?? 0) + processed;
+          const completedSeconds = [...(job.completedSegmentIndexes ?? [])]
+            .reduce((total, segmentIndex) => total + segmentDuration(job, segmentIndex), 0);
+          job.progressSeconds = Math.min(item.duration, completedSeconds);
+        }
+        if (job.cancelled) return;
+        const temporaryPlaylist = `${job.playlistPath}.part`;
+        await writeFile(temporaryPlaylist, playlist, 'utf8');
+        await rename(temporaryPlaylist, job.playlistPath);
+        job.state = 'ready';
+        job.progressSeconds = item.duration;
+        job.error = undefined;
+        void this.pruneCache(job.directory);
+      } catch (cause) {
+        if (job.cancelled) return;
+        job.state = 'failed';
+        job.failedAt = Date.now();
+        job.error = cause instanceof Error ? cause.message : String(cause);
+      }
+    })();
+  }
+
   async ensureOnDemandSegment(job: TranscodeJob, item: MediaItem, fileName: string) {
     const match = fileName.match(/^seg_(\d{6})\.ts$/);
     const index = match ? Number(match[1]) : Number.NaN;
-    if (job.strategy !== 'on-demand' || !Number.isInteger(index) || index < 0 || index >= (job.totalSegments ?? 0)) {
+    if (!Number.isInteger(index) || index < 0 || index >= (job.totalSegments ?? 0)) {
       return undefined;
     }
     this.touchJob(job);
     const targetPath = path.join(job.directory, fileName);
+    if (job.strategy === 'precompute') {
+      return job.state === 'ready' && job.completedSegmentIndexes?.has(index) && await exists(targetPath)
+        ? targetPath
+        : undefined;
+    }
+    if (job.strategy !== 'on-demand') return undefined;
     if (await exists(targetPath)) {
       job.completedSegmentIndexes?.add(index);
       return targetPath;
@@ -915,6 +1053,7 @@ export class TranscodeManager {
   }
 
   async waitForPlaylist(job: TranscodeJob, timeoutMs = 20_000) {
+    if (await exists(job.playlistPath)) return true;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (job.state === 'failed') throw new Error(job.error || '转码失败');
@@ -922,6 +1061,10 @@ export class TranscodeManager {
       await wait(100);
     }
     return false;
+  }
+
+  renew(job: TranscodeJob) {
+    this.touchJob(job);
   }
 
   resolveAsset(job: TranscodeJob, fileName: string) {
@@ -962,7 +1105,7 @@ export class TranscodeManager {
     const job = this.jobs.get(key);
     const plan = job?.superResolutionPlan ?? serverSuperResolutionPlan(item, superResolution);
     const aiUnavailable = isAiSuperResolutionLevel(superResolution) && !this.aiSuperResolutionAvailable;
-    if (job?.strategy === 'on-demand') {
+    if (job?.strategy === 'on-demand' || job?.strategy === 'precompute') {
       const completedSeconds = [...(job.completedSegmentIndexes ?? [])]
         .reduce((total, index) => total + segmentDuration(job, index), 0);
       const activeSeconds = [...(job.segmentProgressSeconds?.entries() ?? [])]
@@ -993,13 +1136,17 @@ export class TranscodeManager {
           : undefined,
         generatedSegments: job.completedSegmentIndexes?.size ?? 0,
         totalSegments: job.totalSegments ?? 0,
-        generationState: remainingSeconds <= 0
+        generationState: remainingSeconds <= 0 && job.state === 'ready'
           ? 'complete'
-          : (job.segmentProcesses?.size ?? 0) > 0 ? 'processing' : 'waiting',
+          : job.state === 'failed'
+            ? 'failed'
+            : job.state === 'running' || job.state === 'preparing'
+              ? 'processing'
+              : 'waiting',
         generationStage: job.segmentStages?.values().next().value,
         enhancementBackend: isAiSuperResolutionLevel(superResolution) ? AI_BACKEND_NAME : 'FFmpeg zscale + CAS',
-        strategy: 'on-demand',
-        seekable: true,
+        strategy: job.strategy,
+        seekable: job.strategy === 'on-demand' || job.state === 'ready',
         error: job.error,
         superResolution,
         plan,
@@ -1034,8 +1181,10 @@ export class TranscodeManager {
           progressPercent: 0,
           speed: 0,
           generationState: 'waiting',
-          strategy: superResolution !== 'off' && item.duration > 0 ? 'on-demand' : 'eager',
-          seekable: superResolution !== 'off' && item.duration > 0,
+          strategy: isAiSuperResolutionLevel(superResolution)
+            ? 'precompute'
+            : superResolution !== 'off' && item.duration > 0 ? 'on-demand' : 'eager',
+          seekable: !isAiSuperResolutionLevel(superResolution) && superResolution !== 'off' && item.duration > 0,
           error: aiUnavailable ? this.aiSuperResolutionReason : plan.reason,
           superResolution,
           plan,
