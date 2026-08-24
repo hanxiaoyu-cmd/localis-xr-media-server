@@ -39,6 +39,12 @@ beforeAll(async () => {
     mediaDirs: [path.join(process.cwd(), 'sample-media'), mutableMediaDir], port: 0, host: '127.0.0.1',
     authDisabled: true, pairingCode: '123456', allowedHosts: ['localhost', '127.0.0.1'],
     ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', maxTranscodes: 2,
+    aiSuperResolutionPath: process.platform === 'win32'
+      ? path.join(process.cwd(), 'desktop', 'vendor', 'realesrgan', 'realesrgan-ncnn-vulkan.exe')
+      : undefined,
+    aiSuperResolutionModelsPath: process.platform === 'win32'
+      ? path.join(process.cwd(), 'desktop', 'vendor', 'realesrgan', 'models')
+      : undefined,
   };
   const library = new MediaLibrary(config);
   const auth = new PairingAuth(config);
@@ -217,6 +223,46 @@ describe('Localis API', () => {
     expect((JSON.parse(sphericalProbe.stdout) as { streams: Array<{ width: number; height: number }> }).streams[0])
       .toMatchObject({ width: sphericalPlan.outputWidth, height: sphericalPlan.outputHeight });
   });
+
+  it.runIf(process.platform === 'win32')('runs the bundled AI model and returns a seekable H.264 segment', async () => {
+    const health = await host(request(api).get('/api/health')).expect(200);
+    expect(health.body.aiSuperResolution).toMatchObject({
+      available: true,
+      backend: 'Real-ESRGAN NCNN Vulkan',
+    });
+    const item = deps.library.get(deps.library.list().find((candidate) => candidate.title === 'flat-demo')!.id)!;
+    const plan = serverSuperResolutionPlan(item, 'ai');
+    const playlist = await host(request(api).get(`/api/media/${item.id}/hls/ai/index.m3u8`)).expect(200);
+    expect(playlist.text).toContain('#EXT-X-TARGETDURATION:1');
+    expect(playlist.text.match(/#EXTINF:/g)).toHaveLength(Math.ceil(item.duration));
+
+    await host(request(api).get(`/api/media/${item.id}/hls/ai/seg_000000.ts`)).expect(200);
+    const status = deps.transcodes.statusForItem(item, 'ai');
+    expect(status).toMatchObject({
+      state: 'ready',
+      superResolution: 'ai',
+      enhancementBackend: 'Real-ESRGAN NCNN Vulkan',
+      generatedSegments: 1,
+      strategy: 'on-demand',
+      plan: { outputWidth: plan.outputWidth, outputHeight: plan.outputHeight },
+    });
+    const job = deps.transcodes.jobForItem(item, 'ai')!;
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error', '-show_entries', 'stream=codec_name,width,height,pix_fmt:format=duration',
+      '-of', 'json', path.join(job.directory, 'seg_000000.ts'),
+    ], { windowsHide: true });
+    const probe = JSON.parse(stdout) as {
+      streams: Array<{ codec_name: string; width?: number; height?: number; pix_fmt?: string }>;
+      format: { duration: string };
+    };
+    expect(probe.streams).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        codec_name: 'h264', width: plan.outputWidth, height: plan.outputHeight, pix_fmt: 'yuv420p',
+      }),
+      expect.objectContaining({ codec_name: 'aac' }),
+    ]));
+    expect(Number(probe.format.duration)).toBeGreaterThanOrEqual(1);
+  }, 120_000);
 
   it('publishes a full-duration VOD timeline immediately and generates a far seek segment first', async () => {
     const item = deps.library.get(deps.library.list().find((candidate) => candidate.title === 'seekable-long')!.id)!;

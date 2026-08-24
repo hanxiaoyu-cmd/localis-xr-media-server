@@ -26,6 +26,8 @@ interface TranscodeStatus {
   generatedSegments?: number;
   totalSegments?: number;
   generationState?: 'waiting' | 'processing' | 'complete' | 'failed';
+  generationStage?: 'extracting' | 'enhancing' | 'encoding';
+  enhancementBackend?: string;
   strategy?: 'eager' | 'on-demand';
   seekable?: boolean;
 }
@@ -52,7 +54,7 @@ function clock(seconds: number) {
   return `${minutes}:${String(whole % 60).padStart(2, '0')}`;
 }
 
-const serverSuperResolutionLevels = new Set<ServerSuperResolutionLevel>(['off', 'standard', 'high', 'ultra']);
+const serverSuperResolutionLevels = new Set<ServerSuperResolutionLevel>(['off', 'standard', 'high', 'ultra', 'ai']);
 
 function savedSuperResolution(): ServerSuperResolutionLevel {
   if (typeof window === 'undefined') return 'standard';
@@ -65,7 +67,11 @@ function savedSuperResolution(): ServerSuperResolutionLevel {
 }
 
 function superResolutionLabel(level: ServerSuperResolutionLevel) {
-  return level === 'standard' ? '标准' : level === 'high' ? '高' : level === 'ultra' ? '极致' : '关闭';
+  return level === 'standard' ? '标准' : level === 'high' ? '高' : level === 'ultra' ? '极致' : level === 'ai' ? 'AI 清晰' : '关闭';
+}
+
+function generationStageLabel(stage?: TranscodeStatus['generationStage']) {
+  return stage === 'extracting' ? '提取画面' : stage === 'enhancing' ? 'AI 重建' : stage === 'encoding' ? '输出兼容流' : '生成';
 }
 
 export function MediaPlayer({ mediaId }: { mediaId: string }) {
@@ -537,12 +543,12 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
                     {serverEnhancement?.generationState === 'complete'
                       ? '缓存完成'
                       : serverEnhancement?.generationState === 'processing'
-                        ? `生成 ${clock(serverEnhancement.activeSegmentStartSeconds ?? displayedTime)} · ${activeEnhancementPercent.toFixed(0)}%${enhancementSpeed ? ` · ${enhancementSpeed}` : ''}${enhancementEta ? ` · ${enhancementEta}` : ''}`
+                        ? `${generationStageLabel(serverEnhancement.generationStage)} ${clock(serverEnhancement.activeSegmentStartSeconds ?? displayedTime)} · ${activeEnhancementPercent.toFixed(0)}%${enhancementSpeed ? ` · ${enhancementSpeed}` : ''}${enhancementEta ? ` · ${enhancementEta}` : ''}`
                         : `已缓存 ${serverEnhancement?.generatedSegments ?? 0} 段 · ${enhancementPercentLabel}${enhancementSpeed ? ` · ${enhancementSpeed}` : ''}`}
                   </strong>
                 </div>
                 <div className="enhancement-track" style={enhancementTrackStyle} role="progressbar" aria-label="电脑端超分生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(displayedEnhancementPercent)}><i /></div>
-                <small>{serverEnhancement?.strategy === 'on-demand' ? `整部影片可直接拖动；电脑会优先生成你跳到的位置。总缓存 ${enhancementPercentLabel}。` : '电脑正在准备完整兼容流。'}</small>
+                <small>{serverEnhancement?.strategy === 'on-demand' ? `${superResolution === 'ai' ? '神经网络在电脑显卡上逐帧重建并缓存；' : ''}整部影片可直接拖动，电脑会优先生成你跳到的位置。总缓存 ${enhancementPercentLabel}。` : '电脑正在准备完整兼容流。'}</small>
               </div>
             )}
             <div className="playback-control-row">
@@ -578,7 +584,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
           <label>投影<select value={item.projection} onChange={(event) => void updateMedia({ projection: event.target.value as PublicMediaItem['projection'] })}><option value="flat">平面</option><option value="equirect180">VR180</option><option value="equirect360">VR360</option></select></label>
           <label>立体布局<select value={item.stereo} onChange={(event) => void updateMedia({ stereo: event.target.value as PublicMediaItem['stereo'] })}><option value="mono">单目</option><option value="sbs">左右 SBS</option><option value="tb">上下 TB</option></select></label>
           <label>左右眼<select value={item.eyeOrder} disabled={item.stereo === 'mono'} onChange={(event) => void updateMedia({ eyeOrder: event.target.value as PublicMediaItem['eyeOrder'] })}><option value="lr">左 / 右</option><option value="rl">右 / 左</option></select></label>
-          <label>电脑端超分<select aria-label="电脑端超分" value={superResolution} disabled={item.kind !== 'video'} onChange={(event) => changeSuperResolution(event.target.value as ServerSuperResolutionLevel)}><option value="off">关闭（可直连时为原片）</option><option value="standard">标准 · 最多 1.25×</option><option value="high">高 · 最多 1.5×</option><option value="ultra">极致 · 最多 2×</option></select></label>
+          <label>电脑端超分<select aria-label="电脑端超分" value={superResolution} disabled={item.kind !== 'video'} onChange={(event) => changeSuperResolution(event.target.value as ServerSuperResolutionLevel)}><option value="off">关闭（可直连时为原片）</option><option value="standard">标准 · 最多 1.25×</option><option value="high">高 · 最多 1.5×</option><option value="ultra">极致 · 最多 2×</option><option value="ai">AI 清晰 · Real-ESRGAN 2×（需缓冲）</option></select></label>
           <label className="yaw-control">朝向<input aria-label="水平朝向" type="range" min="-3.15" max="3.15" step="0.05" value={item.yawOffset} onChange={(event) => void updateMedia({ yawOffset: Number(event.target.value) })} /></label>
           <button className="mode-button" onClick={() => void updateMedia({ yawOffset: 0 })}>重新居中</button>
           <button className="mode-button" disabled={superResolution !== 'off'} onClick={() => { directFailed.current = transport === 'direct'; setTransport(transport === 'direct' ? 'hls' : 'direct'); }}>{superResolution !== 'off' ? '超分由电脑流式输出' : transport === 'direct' ? '使用兼容流' : '尝试原文件'}</button>
@@ -587,7 +593,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
         <button className="xr-button" disabled={!xrSupported || enteringXr || item.kind !== 'video'} onClick={() => void enterXr()}>{enteringXr ? '正在进入…' : xrSupported ? '进入沉浸模式' : '此环境不可用 WebXR'}</button>
       </section>
 
-      {item.kind === 'video' && <p className="super-resolution-note">超分与锐化完全由运行 Localis 的电脑完成；Vision Pro、Quest 和 PICO 只接收标准 H.264 HLS 并负责显示。档位倍率是上限：高分辨率原片不会被反向缩小，超过 H.264 Level 5.2 安全范围时会明确停用该档。</p>}
+      {item.kind === 'video' && <p className="super-resolution-note">超分与锐化完全由运行 Localis 的电脑完成；Vision Pro、Quest 和 PICO 只接收标准 H.264 HLS 并负责显示。AI 清晰使用随 EXE 携带的 Real-ESRGAN/NCNN Vulkan 通用视频模型，按 1 秒分片生成并缓存；无需 Python、PyTorch 或 CUDA 环境。SBS/TB 与 VR360 暂使用其他档位，以避免眼间串色和环绕接缝。</p>}
 
       <section className="media-details">
         <div><span>时长</span><strong>{clock(item.duration)}</strong></div>
@@ -596,7 +602,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
         <div><span>XR 安全环境</span><strong>{diagnostics?.secureContext ? '是' : '否'}</strong></div>
         <div><span>设备端超分</span><strong>已禁用</strong></div>
         <div><span>丢帧</span><strong>{diagnostics?.droppedFrames ?? '播放后检测'}{diagnostics?.totalFrames ? ` / ${diagnostics.totalFrames}` : ''}</strong></div>
-        <div><span>电脑端超分</span><strong>{superResolution === 'off' ? '关闭' : serverEnhancement?.plan.outputWidth ? `${serverEnhancement.plan.sourceWidth}×${serverEnhancement.plan.sourceHeight} → ${serverEnhancement.plan.outputWidth}×${serverEnhancement.plan.outputHeight} · ${serverEnhancement.encoder}` : `${superResolutionLabel(superResolution)} · 准备中`}</strong></div>
+        <div><span>电脑端超分</span><strong>{superResolution === 'off' ? '关闭' : serverEnhancement?.plan.outputWidth ? `${serverEnhancement.plan.sourceWidth}×${serverEnhancement.plan.sourceHeight} → ${serverEnhancement.plan.outputWidth}×${serverEnhancement.plan.outputHeight} · ${serverEnhancement.enhancementBackend || serverEnhancement.encoder}` : `${superResolutionLabel(superResolution)} · 准备中`}</strong></div>
       </section>
     </main>
   );

@@ -144,7 +144,17 @@ export function createApiApp(deps: AppDependencies) {
   });
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'localis', mediaCount: library.items.size, encoder: transcodes.encoder });
+    res.json({
+      ok: true,
+      service: 'localis',
+      mediaCount: library.items.size,
+      encoder: transcodes.encoder,
+      aiSuperResolution: {
+        available: transcodes.aiSuperResolutionAvailable,
+        backend: 'Real-ESRGAN NCNN Vulkan',
+        reason: transcodes.aiSuperResolutionReason || undefined,
+      },
+    });
   });
   app.get('/api/pair/status', (req, res) => {
     const isDesktop = isLoopbackAddress(req.socket.remoteAddress);
@@ -168,6 +178,11 @@ export function createApiApp(deps: AppDependencies) {
       host: safeHost(req),
       port: config.port,
       encoder: transcodes.encoder,
+      aiSuperResolution: {
+        available: transcodes.aiSuperResolutionAvailable,
+        backend: 'Real-ESRGAN NCNN Vulkan',
+        reason: transcodes.aiSuperResolutionReason || undefined,
+      },
       mediaCount: library.items.size,
       libraryCount: config.mediaDirs.length,
       pairingCode: isLoopbackAddress(req.socket.remoteAddress) && !config.authDisabled ? config.pairingCode : undefined,
@@ -443,7 +458,7 @@ export function createApiApp(deps: AppDependencies) {
   const requestedSuperResolution = (req: Request, res: Response) => {
     const raw = req.params.level;
     if (raw !== undefined && !SERVER_SUPER_RESOLUTION_LEVELS.has(raw as never)) {
-      res.status(400).json({ error: 'invalid_super_resolution_level', message: '超分档位必须是 off、standard、high 或 ultra。' });
+      res.status(400).json({ error: 'invalid_super_resolution_level', message: '超分档位必须是 off、standard、high、ultra 或 ai。' });
       return undefined;
     }
     return parseServerSuperResolutionLevel(raw);

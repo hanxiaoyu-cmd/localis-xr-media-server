@@ -42,6 +42,7 @@ function appendLog(source, chunk) {
 }
 
 function spawnNode(name, entry, environment = {}) {
+  const aiRoot = path.join(rootDir(), 'desktop', 'vendor', 'realesrgan');
   const child = spawn(process.execPath, [entry], {
     cwd: rootDir(),
     windowsHide: true,
@@ -55,6 +56,8 @@ function spawnNode(name, entry, environment = {}) {
       LOCALIS_PORT: String(localisPort),
       FFMPEG_PATH: executablePath(ffmpegStatic),
       FFPROBE_PATH: executablePath(ffprobeStatic.path),
+      LOCALIS_AI_SR_PATH: path.join(aiRoot, 'realesrgan-ncnn-vulkan.exe'),
+      LOCALIS_AI_SR_MODELS_PATH: path.join(aiRoot, 'models'),
       ...environment,
     },
   });

@@ -1,6 +1,6 @@
 import type { MediaItem } from './types';
 
-export type ServerSuperResolutionLevel = 'off' | 'standard' | 'high' | 'ultra';
+export type ServerSuperResolutionLevel = 'off' | 'standard' | 'high' | 'ultra' | 'ai';
 
 export interface ServerSuperResolutionProfile {
   level: ServerSuperResolutionLevel;
@@ -43,6 +43,7 @@ export const SERVER_SUPER_RESOLUTION_LEVELS = new Set<ServerSuperResolutionLevel
   'standard',
   'high',
   'ultra',
+  'ai',
 ]);
 
 export const SERVER_SUPER_RESOLUTION_PROFILES: Record<ServerSuperResolutionLevel, ServerSuperResolutionProfile> = {
@@ -50,7 +51,12 @@ export const SERVER_SUPER_RESOLUTION_PROFILES: Record<ServerSuperResolutionLevel
   standard: { level: 'standard', label: '标准', scale: 1.25, maxLongEdge: 2560, maxPixels: 5_000_000, sharpness: 0.08, interpolation: 'spline16', nvencCq: 21, maxRate: '30M' },
   high: { level: 'high', label: '高', scale: 1.5, maxLongEdge: 3840, maxPixels: 9_000_000, sharpness: 0.14, interpolation: 'spline36', nvencCq: 19, maxRate: '45M' },
   ultra: { level: 'ultra', label: '极致', scale: 2, maxLongEdge: 4096, maxPixels: 12_000_000, sharpness: 0.2, interpolation: 'lanczos', nvencCq: 18, maxRate: '60M' },
+  ai: { level: 'ai', label: 'AI 清晰', scale: 2, maxLongEdge: 4096, maxPixels: 12_000_000, sharpness: 0, interpolation: 'lanczos', nvencCq: 18, maxRate: '60M' },
 };
+
+export function isAiSuperResolutionLevel(level: ServerSuperResolutionLevel) {
+  return level === 'ai';
+}
 
 export function parseServerSuperResolutionLevel(value: unknown): ServerSuperResolutionLevel {
   return SERVER_SUPER_RESOLUTION_LEVELS.has(value as ServerSuperResolutionLevel)
@@ -75,7 +81,7 @@ export function isH264Level52Safe(width: number, height: number, frameRate: numb
 }
 
 export function serverSuperResolutionPlan(
-  item: Pick<MediaItem, 'width' | 'height' | 'sampleAspectRatio' | 'stereo' | 'frameRate'>,
+  item: Pick<MediaItem, 'width' | 'height' | 'sampleAspectRatio' | 'stereo' | 'frameRate'> & { projection?: MediaItem['projection'] },
   level: ServerSuperResolutionLevel,
 ): ServerSuperResolutionPlan {
   const profile = SERVER_SUPER_RESOLUTION_PROFILES[level];
@@ -100,9 +106,22 @@ export function serverSuperResolutionPlan(
   const displayWidth = sourceWidth * sar;
   const displayHeight = sourceHeight;
   const longEdge = Math.max(displayWidth, displayHeight);
-  const widthAlignment = item.stereo === 'sbs' ? 4 : 2;
-  const heightAlignment = item.stereo === 'tb' ? 4 : 2;
+  const widthAlignment = item.stereo === 'sbs' || level === 'ai' ? 4 : 2;
+  const heightAlignment = item.stereo === 'tb' || level === 'ai' ? 4 : 2;
   const outputFrameRate = Math.min(60, Math.max(1, item.frameRate || 60));
+
+  if (level === 'ai' && (item.stereo !== 'mono' || item.projection === 'equirect360')) {
+    return {
+      ...profile,
+      available: false,
+      enabled: false,
+      activeMode: 'off',
+      sourceWidth,
+      sourceHeight,
+      outputFrameRate,
+      reason: 'AI 清晰当前只处理单目平面或 VR180 视频；SBS/TB 与 VR360 请使用标准、高或极致档，避免眼间串色与 360° 接缝。',
+    };
+  }
 
   if (level === 'off') {
     let scale = Math.min(1, profile.maxLongEdge / longEdge);
@@ -191,6 +210,20 @@ export function serverSuperResolutionPlan(
   const outputHeight = target.height;
   const areaScale = outputWidth * outputHeight / (displayWidth * displayHeight);
   const activeMode = areaScale > 1.01 ? 'upscale' : 'sharpen';
+  if (level === 'ai' && activeMode !== 'upscale') {
+    return {
+      ...profile,
+      available: false,
+      enabled: false,
+      activeMode: 'off',
+      sourceWidth,
+      sourceHeight,
+      outputWidth,
+      outputHeight,
+      outputFrameRate,
+      reason: '源画面已达到 AI 档的输出预算；继续神经网络重建只会增加等待，不会提高可播放分辨率，请使用原片或极致档。',
+    };
+  }
   return {
     ...profile,
     available: true,
@@ -212,6 +245,9 @@ export function buildVideoFilters(
   level: ServerSuperResolutionLevel,
   pixelFormat: 'yuv420p' | 'nv12',
 ) {
+  if (level === 'ai') {
+    throw new ServerSuperResolutionUnavailableError('AI 清晰必须由电脑端 Real-ESRGAN 分片流水线生成。');
+  }
   const sourceFps = Math.max(1, item.frameRate || 30);
   const fps = Math.min(60, Math.max(1, item.frameRate || 60));
   const filters: string[] = [];

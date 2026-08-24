@@ -10,7 +10,7 @@
 - Windows 包内 FFmpeg `6.1.1-essentials`、ffprobe `4.0.2`、Electron `43.4.1`
 - GPU：NVIDIA GeForce RTX 5090 D
 - 浏览器：Codex 内置 Chromium，生产构建真实页面与媒体元素
-- 当前 LAN 地址：`192.168.31.87:8080`
+- 当前 LAN 地址：`192.168.31.188:8080`
 
 ## 已实际通过
 
@@ -18,14 +18,16 @@
 | --- | --- | --- |
 | ESLint | 通过 | 全项目无 lint 错误或警告 |
 | TypeScript | 通过 | `tsc --noEmit` |
-| 单元/集成 | 12 个文件、59 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、完整时长 seek、电脑端超分、真实转码、电脑端云盘工作台、云盘协议与安全边界 |
+| 单元/集成 | 12 个文件、62 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、完整时长 seek、电脑端五档超分、真实 AI/FFmpeg 转码、电脑端云盘工作台、云盘协议与安全边界 |
 | 生产构建 | 通过 | Vinext 五阶段 client/RSC/SSR 构建 |
 | 编码器探测 | 通过 | NVENC、Media Foundation、libx264 运行时真实编码探测；本机自动选择 NVENC |
 | NVENC 路径 | 通过 | 完整集成套件真实生成 H.264/yuv420p + AAC fMP4 HLS |
 | Media Foundation 路径 | 18/18 通过 | 强制 `h264_mf` 后完整 API 集成测试通过，含远距离按需分片 |
 | libx264 路径 | 18/18 通过 | 强制 `libx264` 后完整 API 集成测试通过，含远距离按需分片 |
-| 电脑端超分规划 | 8/8 通过 | 四档解析、绝不反向缩小、Level 5.2、安全像素率、SAR、SBS/TB 拆眼、360 接缝与 60 fps 上限 |
+| 电脑端超分规划 | 9/9 通过 | 五档解析、绝不反向缩小、Level 5.2、安全像素率、SAR、SBS/TB 拆眼、360 接缝、AI 安全布局与 60 fps 上限 |
 | 标准档真实 HLS | 通过 | 1280×720 → 1600×900，按需 MPEG-TS 分片经 FFprobe 确认为 H.264/yuv420p，非关闭档强制电脑转码 |
+| AI 清晰真实 HLS | 通过 | 随包 Real-ESRGAN NCNN Vulkan 真实推理：1280×720 → 2560×1440，1 秒分片经 FFprobe 确认为 H.264/yuv420p + AAC，首段约 2 秒 |
+| AI 中间色阶 | 通过 | JPEG 神经网络输出显式从 full range 转换为 limited range，修复首次回归发现的 yuvj420p 标记 |
 | 完整时长远距离 seek | 通过 | 12 秒三分片 VOD 清单立即返回；不请求片头，先请求最后一段并验证时间戳从 8 秒附近开始 |
 | 高档真实页面 | 通过 | 生产浏览器加载 `/hls/high/index.m3u8`，绿色播放器和超分缓存进度正确显示 |
 | VR360 高档 HLS | 通过 | 真实 1280×640 equirect360 经 `v360` 环绕采样输出 1920×960，避免水平接缝钳制 |
@@ -52,8 +54,8 @@
 | 内部界面端口 | 通过 | Vinext 仅绑定 `127.0.0.1:3210`，LAN 只暴露带配对与安全头的 8080 |
 | 依赖审计 | 通过 | `npm audit --audit-level=low`：0 个已知漏洞 |
 | 浏览器控制台 | 通过 | 最终 localhost 播放器、云盘弹窗与 LAN 首页均为 0 个 error/warning |
-| Windows 安装版 | 通过 | NSIS 静默安装到隔离目录，安装后真实启动、扫描、转码，再由自带卸载器完整移除 |
-| Windows 便携版 | 通过 | 最终 Release EXE 首次解压并真实启动；内置 ffprobe 扫描 14 个媒体，内置 FFmpeg/NVENC 生成 1280×720 → 1600×900、4,765,048 字节 MPEG-TS 分片 |
+| Windows 安装版 | 通过 | NSIS 静默安装到隔离目录，包内 AI 运行时/模型/许可证齐全；安装后真实启动、扫描、传统超分与 AI 推理，再由自带卸载器移除 |
+| Windows 便携版 | 通过 | 最终 Release EXE 首次解压并真实启动；内置 ffprobe 扫描 14 个媒体，FFmpeg/NVENC 生成 4,765,048 字节传统分片，Real-ESRGAN 生成 2,750,628 字节 AI 分片 |
 | 桌面安全边界 | 通过 | localhost 自动完成电脑端配对并显示六位码；通过 `192.168.31.87` 请求的 LAN 客户端响应不含配对码，管理能力仍不可见 |
 | 最终桌面视觉 | 通过 | 最终便携版页面实际截图检查：绿色/石墨控制台、配对码卡片、播放器进度与电脑端超分状态正常；浏览器 0 个 error/warning |
 
@@ -68,6 +70,7 @@ compatibility playlist: EXT-X-MAP + EXT-X-ENDLIST
 super-resolution playlist: EXT-X-PLAYLIST-TYPE:VOD + full-duration EXTINF entries
 far seek: request seg_000002.ts before seg_000000.ts
 standard SR: 1280x720 -> 1600x900
+AI SR: 1280x720 -> 2560x1440, 1-second segments, Real-ESRGAN NCNN Vulkan
 ```
 
 回归还覆盖：
@@ -77,8 +80,8 @@ standard SR: 1280x720 -> 1600x900
 - 16:15 SAR → 4:3 方形像素显示比例。
 - 120 fps → 不超过 60 fps。
 - SBS 与 TB 每只眼独立缩放和锐化，滤镜图不会跨眼取样。
-- `off`、`standard`、`high`、`ultra` 使用不同缓存键。
-- 旧 HLS 缓存不会污染 `v6-seekable-on-demand-sr` 管线。
+- `off`、`standard`、`high`、`ultra`、`ai` 使用不同缓存键。
+- 旧 HLS 缓存不会污染 `v7-seekable-on-demand-ai-sr` 管线。
 - 两个同时转码槽被占满时返回 `503 + Retry-After`，释放后可重试。
 - 播放者持有 60 秒共享租约；页面放弃后由 15 秒清理器停止过期 FFmpeg，活跃请求不会被误杀。
 
@@ -110,6 +113,7 @@ standard SR: 1280x720 -> 1600x900
 8. 原云盘窗口把百度应用身份和 OpenList 参数都当作日常导入步骤。现在百度只在电脑端首次设置并加密保存，之后直接扫码；夸克改用官方组件在电脑浏览器 OAuth，再在电脑上搜索和完整下载，不把第三方明文换票链路包装成快捷登录。
 9. 云盘弹窗新增多阶段表单后，过宽的 CSS 后代选择器曾把整个弹窗根节点变成横向 flex。真实浏览器截图发现后已把规则限定到具体表单，百度与夸克页面重新截图复验布局正常。
 10. 顺序 EVENT HLS 只暴露已转码到的时间范围，Vision Pro 选择超分后无法拖到长片后段。现在非关闭档立即发布完整 VOD 时间线，Safari/HLS 请求哪个 4 秒分片，电脑就从对应时间点优先生成；绿色控制条同时显示当前分片进度、处理倍速和总缓存覆盖率。真实 2:22:03 电影已从 10:36 跳到 1:46:32 并继续播放。
+11. AI 中间 JPEG 是 full-range 色阶，首次真实 NVENC 回归把成品标记为 `yuvj420p`。现在输出阶段显式转换为 limited range 并写入 range metadata，最终 ffprobe 为 visionOS 更稳妥的 `yuv420p`。
 
 ## 尚未声称通过
 
@@ -123,4 +127,11 @@ standard SR: 1280x720 -> 1600x900
 - 公网可信 DNS-01 证书实际签发；缺少用户域名与 Cloudflare Token。
 - 真实 Wi-Fi 抖动、90 分钟 soak、电脑极致档并行负载。
 
-当前电脑端引擎是可验证的空间缩放 + CAS 锐化，不是 AI/神经超分。发布真机或真实云盘兼容声明前，必须完成 [HEADSET_ACCEPTANCE.md](./HEADSET_ACCEPTANCE.md)。
+当前电脑端包含两条可验证路径：标准/高/极致使用空间缩放 + CAS，AI 清晰使用随包 Real-ESRGAN NCNN Vulkan 神经网络。当前测试证明电脑端模型与 HLS 输出有效，不等于 Vision Pro/Quest/PICO 真机已验收；发布真机或真实云盘兼容声明前，必须完成 [HEADSET_ACCEPTANCE.md](./HEADSET_ACCEPTANCE.md)。
+
+## 本次 Windows 产物
+
+| 文件 | 大小 | SHA-256 |
+| --- | ---: | --- |
+| `Localis-Setup-0.3.0-x64.exe` | 208,766,617 bytes | `FE085493F66A721098E113D44A79AD1969BCA0ABC9C2F4D45F145FD5739F4772` |
+| `Localis-Portable-0.3.0-x64.exe` | 208,346,726 bytes | `C1CCEF4A42D2D08708CE16506EE2EA3AEF370EF2515A38AAA3282A3BB3AF7B3F` |

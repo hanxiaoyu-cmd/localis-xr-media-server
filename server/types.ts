@@ -73,6 +73,8 @@ export interface LocalisConfig {
   allowedHosts: string[];
   ffmpegPath: string;
   ffprobePath: string;
+  aiSuperResolutionPath?: string;
+  aiSuperResolutionModelsPath?: string;
   maxTranscodes: number;
   maxCacheBytes?: number;
   cloudCacheBytes?: number;

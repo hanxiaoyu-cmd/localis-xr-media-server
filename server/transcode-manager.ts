@@ -6,6 +6,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { LocalisConfig, MediaItem } from './types';
 import {
   buildVideoPipeline,
+  isAiSuperResolutionLevel,
   serverSuperResolutionPlan,
   SERVER_SUPER_RESOLUTION_PROFILES,
   ServerSuperResolutionUnavailableError,
@@ -19,7 +20,7 @@ export type JobState = 'preparing' | 'running' | 'ready' | 'failed';
 export class SourceChangedError extends Error {}
 export class TranscodeCapacityError extends Error {}
 
-export const TRANSCODE_CACHE_SCHEMA = 'v6-seekable-on-demand-sr';
+export const TRANSCODE_CACHE_SCHEMA = 'v7-seekable-on-demand-ai-sr';
 
 export interface TranscodeJob {
   key: string;
@@ -47,6 +48,7 @@ export interface TranscodeJob {
   segmentInflight?: Map<number, Promise<string>>;
   segmentProcesses?: Map<number, ChildProcessWithoutNullStreams>;
   segmentProgressSeconds?: Map<number, number>;
+  segmentStages?: Map<number, 'extracting' | 'enhancing' | 'encoding'>;
   processedMediaSeconds?: number;
   processingWallSeconds?: number;
 }
@@ -57,6 +59,9 @@ export interface TranscodeJob {
 export const TRANSCODE_ACTIVITY_LEASE_MS = 60_000;
 export const TRANSCODE_IDLE_SWEEP_INTERVAL_MS = 15_000;
 export const ON_DEMAND_SEGMENT_SECONDS = 4;
+export const AI_ON_DEMAND_SEGMENT_SECONDS = 1;
+const AI_MODEL_NAME = 'localis-general-x4';
+const AI_BACKEND_NAME = 'Real-ESRGAN NCNN Vulkan';
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -125,7 +130,10 @@ export class TranscodeManager {
   private sweepTimer?: ReturnType<typeof setInterval>;
   private readonly cancellationPromises = new Map<string, Promise<void>>();
   private activeOnDemandTasks = 0;
+  private activeAiTasks = 0;
   encoder = 'libx264';
+  aiSuperResolutionAvailable = false;
+  aiSuperResolutionReason = '此版本未包含 AI 超分运行时。';
 
   constructor(private readonly config: LocalisConfig) {}
 
@@ -152,7 +160,25 @@ export class TranscodeManager {
     await this.pruneCache();
     this.availableEncoders = await this.probeEncoders();
     this.encoder = this.availableEncoders[0];
+    await this.probeAiSuperResolution();
     this.startLeaseSweeper();
+  }
+
+  private async probeAiSuperResolution() {
+    const executable = this.config.aiSuperResolutionPath;
+    const models = this.config.aiSuperResolutionModelsPath;
+    if (!executable || !models) return;
+    const required = [
+      executable,
+      path.join(models, `${AI_MODEL_NAME}.param`),
+      path.join(models, `${AI_MODEL_NAME}.bin`),
+    ];
+    if (!(await Promise.all(required.map(exists))).every(Boolean)) {
+      this.aiSuperResolutionReason = 'AI 超分运行时或模型文件不完整，请重新安装 Localis。';
+      return;
+    }
+    this.aiSuperResolutionAvailable = true;
+    this.aiSuperResolutionReason = '';
   }
 
   private startLeaseSweeper() {
@@ -224,6 +250,9 @@ export class TranscodeManager {
     const requestedPlan = serverSuperResolutionPlan(item, superResolution);
     if (superResolution !== 'off' && !requestedPlan.available) {
       throw new ServerSuperResolutionUnavailableError(requestedPlan.reason || '无法安全生成电脑端超分流。');
+    }
+    if (isAiSuperResolutionLevel(superResolution) && !this.aiSuperResolutionAvailable) {
+      throw new ServerSuperResolutionUnavailableError(this.aiSuperResolutionReason);
     }
     const current = await stat(item.path);
     if (item.sourceType === 'local' && (current.size !== item.size || current.mtime.toISOString() !== item.modifiedAt)) {
@@ -315,7 +344,10 @@ export class TranscodeManager {
     directory: string,
     playlistPath: string,
   ) {
-    const manifest = onDemandPlaylist(item.duration);
+    const segmentSeconds = isAiSuperResolutionLevel(superResolution)
+      ? AI_ON_DEMAND_SEGMENT_SECONDS
+      : ON_DEMAND_SEGMENT_SECONDS;
+    const manifest = onDemandPlaylist(item.duration, segmentSeconds);
     await mkdir(directory, { recursive: true });
     let cachedPlaylist = '';
     try { cachedPlaylist = await readFile(playlistPath, 'utf8'); } catch { /* first request */ }
@@ -335,7 +367,7 @@ export class TranscodeManager {
       }
     }
     const progressSeconds = [...completedSegmentIndexes].reduce(
-      (total, index) => total + Math.min(ON_DEMAND_SEGMENT_SECONDS, item.duration - index * ON_DEMAND_SEGMENT_SECONDS),
+      (total, index) => total + Math.min(segmentSeconds, item.duration - index * segmentSeconds),
       0,
     );
     const now = Date.now();
@@ -357,12 +389,13 @@ export class TranscodeManager {
       leaseExpiresAt: now + TRANSCODE_ACTIVITY_LEASE_MS,
       strategy: 'on-demand',
       durationSeconds: item.duration,
-      segmentDurationSeconds: ON_DEMAND_SEGMENT_SECONDS,
+      segmentDurationSeconds: segmentSeconds,
       totalSegments: manifest.totalSegments,
       completedSegmentIndexes,
       segmentInflight: new Map(),
       segmentProcesses: new Map(),
       segmentProgressSeconds: new Map(),
+      segmentStages: new Map(),
       // Speed is measured only from work performed in this process. Cached
       // segments from an earlier run must not inflate the reported rate.
       processedMediaSeconds: 0,
@@ -461,13 +494,18 @@ export class TranscodeManager {
 
   private async acquireOnDemandSlot(job: TranscodeJob) {
     await this.reclaimExpiredJobsForCapacity();
-    while (!job.cancelled && this.activeWorkCount() >= this.config.maxTranscodes) await wait(50);
+    while (!job.cancelled && (
+      this.activeWorkCount() >= this.config.maxTranscodes
+      || (isAiSuperResolutionLevel(job.superResolution) && this.activeAiTasks >= 1)
+    )) await wait(50);
     if (job.cancelled) throw new Error('超分任务已停止');
     this.activeOnDemandTasks += 1;
+    if (isAiSuperResolutionLevel(job.superResolution)) this.activeAiTasks += 1;
   }
 
-  private releaseOnDemandSlot() {
+  private releaseOnDemandSlot(job: TranscodeJob) {
     this.activeOnDemandTasks = Math.max(0, this.activeOnDemandTasks - 1);
+    if (isAiSuperResolutionLevel(job.superResolution)) this.activeAiTasks = Math.max(0, this.activeAiTasks - 1);
   }
 
   private runOnDemandSegment(job: TranscodeJob, item: MediaItem, index: number, encoder: string, outputPath: string) {
@@ -509,7 +547,167 @@ export class TranscodeManager {
     });
   }
 
+  private runAiChild(
+    job: TranscodeJob,
+    index: number,
+    executable: string,
+    args: string[],
+    stage: 'extracting' | 'enhancing' | 'encoding',
+    onOutput?: (chunk: string) => void,
+  ) {
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn(executable, args, { windowsHide: true, shell: false, cwd: job.directory });
+      job.segmentProcesses?.set(index, child);
+      job.segmentStages?.set(index, stage);
+      let stderr = '';
+      let settled = false;
+      child.stdout.on('data', (chunk: Buffer) => onOutput?.(chunk.toString()));
+      child.stderr.on('data', (chunk: Buffer) => { stderr = `${stderr}${chunk}`.slice(-16_384); });
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (job.segmentProcesses?.get(index) === child) job.segmentProcesses.delete(index);
+        if (error) reject(error);
+        else resolve();
+      };
+      child.once('error', (error) => finish(error));
+      child.once('close', (code) => {
+        if (code === 0) finish();
+        else finish(new Error(stderr.trim() || `${path.basename(executable)} exited with code ${code}`));
+      });
+    });
+  }
+
+  private async encodeAiOnDemandSegment(job: TranscodeJob, item: MediaItem, index: number, targetPath: string) {
+    const executable = this.config.aiSuperResolutionPath;
+    const models = this.config.aiSuperResolutionModelsPath;
+    const plan = job.superResolutionPlan;
+    if (!this.aiSuperResolutionAvailable || !executable || !models || !plan.outputWidth || !plan.outputHeight) {
+      throw new ServerSuperResolutionUnavailableError(this.aiSuperResolutionReason || 'AI 超分不可用。');
+    }
+
+    const start = index * (job.segmentDurationSeconds ?? AI_ON_DEMAND_SEGMENT_SECONDS);
+    const duration = segmentDuration(job, index);
+    const fps = Math.min(60, Math.max(1, item.frameRate || 30));
+    const expectedFrames = Math.max(1, Math.round(duration * fps));
+    // The compact general model is natively 4×. Feeding a 1/2-size image gives
+    // the requested 2× output directly and avoids an enormous 4× temporary
+    // frame. This is the key latency/memory bound for interactive LAN use.
+    const aiInputWidth = Math.max(1, Math.round(plan.outputWidth / 4));
+    const aiInputHeight = Math.max(1, Math.round(plan.outputHeight / 4));
+    const workDirectory = path.join(job.directory, `.ai_${String(index).padStart(6, '0')}`);
+    const inputDirectory = path.join(workDirectory, 'input');
+    const outputDirectory = path.join(workDirectory, 'output');
+    const temporaryPath = `${targetPath}.part`;
+    const wallStartedAt = Date.now();
+    await rm(workDirectory, { recursive: true, force: true });
+    await rm(temporaryPath, { force: true });
+    await mkdir(inputDirectory, { recursive: true });
+    await mkdir(outputDirectory, { recursive: true });
+    job.segmentProgressSeconds?.set(index, 0);
+
+    try {
+      await this.runAiChild(job, index, this.config.ffmpegPath, [
+        '-hide_banner', '-nostdin', '-y', '-loglevel', 'warning',
+        '-ss', start.toFixed(6), '-i', item.path, '-t', duration.toFixed(6),
+        '-an', '-sn', '-dn',
+        '-vf', `fps=${fps},scale=w=${aiInputWidth}:h=${aiInputHeight}:flags=lanczos,tpad=stop_mode=clone:stop_duration=${duration.toFixed(6)},setsar=1`,
+        '-frames:v', String(expectedFrames), '-start_number', '1',
+        path.join(inputDirectory, 'frame_%06d.png'),
+      ], 'extracting');
+      job.segmentProgressSeconds?.set(index, duration * 0.15);
+
+      let enhancedFrames = 0;
+      const progressTimer = setInterval(() => {
+        void readdir(outputDirectory).then((entries) => {
+          enhancedFrames = entries.filter((name) => /^frame_\d{6}\.jpg$/i.test(name)).length;
+          const fraction = Math.min(1, enhancedFrames / expectedFrames);
+          job.segmentProgressSeconds?.set(index, duration * (0.15 + fraction * 0.7));
+        }).catch(() => undefined);
+      }, 200);
+      progressTimer.unref();
+      try {
+        await this.runAiChild(job, index, executable, [
+          '-i', inputDirectory,
+          '-o', outputDirectory,
+          '-m', models,
+          '-n', AI_MODEL_NAME,
+          '-s', '4',
+          '-t', '256',
+          '-j', '2:2:2',
+          '-f', 'jpg',
+        ], 'enhancing');
+      } finally {
+        clearInterval(progressTimer);
+      }
+      const generatedFrames = (await readdir(outputDirectory))
+        .filter((name) => /^frame_\d{6}\.jpg$/i.test(name)).length;
+      if (generatedFrames !== expectedFrames) {
+        throw new Error(`AI 超分只生成了 ${generatedFrames}/${expectedFrames} 帧`);
+      }
+      job.segmentProgressSeconds?.set(index, duration * 0.85);
+
+      const initialEncoder = this.availableEncoders.indexOf(job.encoder);
+      const candidates = this.availableEncoders.slice(Math.max(0, initialEncoder));
+      let lastError: Error | undefined;
+      for (const encoder of candidates) {
+        try {
+          const pixelFormat = encoder === 'h264_mf' ? 'nv12' : 'yuv420p';
+          const gop = Math.max(1, Math.round(fps * 2));
+          let progressBuffer = '';
+          await this.runAiChild(job, index, this.config.ffmpegPath, [
+            '-hide_banner', '-nostdin', '-y', '-loglevel', 'warning', '-progress', 'pipe:1', '-stats_period', '0.25',
+            '-framerate', String(fps), '-start_number', '1', '-i', path.join(outputDirectory, 'frame_%06d.jpg'),
+            '-ss', start.toFixed(6), '-i', item.path,
+            '-t', duration.toFixed(6), '-output_ts_offset', start.toFixed(6),
+            '-map', '0:v:0', '-map', '1:a:0?', '-sn', '-dn',
+            '-vf', `scale=in_range=full:out_range=tv,setsar=1,format=${pixelFormat},setparams=range=limited`,
+            '-g', String(gop), '-keyint_min', String(gop), '-force_key_frames', 'expr:gte(t,n_forced*2)',
+            ...(encoder !== 'h264_mf' ? ['-sc_threshold', '0'] : []),
+            ...this.encoderArgs(encoder, 'ai'),
+            '-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+            '-af', 'aresample=async=1:first_pts=0',
+            '-max_muxing_queue_size', '2048', '-muxdelay', '0', '-muxpreload', '0',
+            '-mpegts_flags', '+resend_headers', '-f', 'mpegts', temporaryPath,
+          ], 'encoding', (chunk) => {
+            progressBuffer += chunk;
+            const lines = progressBuffer.split(/\r?\n/);
+            progressBuffer = lines.pop() || '';
+            for (const line of lines) {
+              const [key, value] = line.split('=', 2);
+              if (key !== 'out_time_us') continue;
+              const encoded = Math.min(duration, Math.max(0, Number(value) / 1_000_000));
+              job.segmentProgressSeconds?.set(index, duration * (0.85 + 0.15 * encoded / duration));
+            }
+          });
+          const info = await stat(temporaryPath);
+          if (!info.isFile() || info.size <= 0) throw new Error('FFmpeg 没有生成有效的 AI 超分分片');
+          await rename(temporaryPath, targetPath);
+          job.encoder = encoder;
+          job.error = undefined;
+          return;
+        } catch (cause) {
+          lastError = cause instanceof Error ? cause : new Error(String(cause));
+          await rm(temporaryPath, { force: true }).catch(() => undefined);
+          if ((job.completedSegmentIndexes?.size ?? 0) > 0) break;
+        }
+      }
+      throw lastError ?? new Error('AI 超分分片编码失败');
+    } finally {
+      job.segmentProcesses?.delete(index);
+      job.segmentStages?.delete(index);
+      job.segmentProgressSeconds?.delete(index);
+      job.processingWallSeconds = (job.processingWallSeconds ?? 0) + (Date.now() - wallStartedAt) / 1_000;
+      await rm(workDirectory, { recursive: true, force: true }).catch(() => undefined);
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+    }
+  }
+
   private async encodeOnDemandSegment(job: TranscodeJob, item: MediaItem, index: number, targetPath: string) {
+    if (isAiSuperResolutionLevel(job.superResolution)) {
+      await this.encodeAiOnDemandSegment(job, item, index, targetPath);
+      return;
+    }
     const temporaryPath = `${targetPath}.part`;
     await rm(temporaryPath, { force: true });
     const initialEncoder = this.availableEncoders.indexOf(job.encoder);
@@ -565,7 +763,7 @@ export class TranscodeManager {
         job.error = cause instanceof Error ? cause.message : String(cause);
         throw cause;
       } finally {
-        this.releaseOnDemandSlot();
+        this.releaseOnDemandSlot(job);
       }
     })();
     job.segmentInflight?.set(index, operation);
@@ -763,6 +961,7 @@ export class TranscodeManager {
     const key = this.jobKey(item, mode, superResolution);
     const job = this.jobs.get(key);
     const plan = job?.superResolutionPlan ?? serverSuperResolutionPlan(item, superResolution);
+    const aiUnavailable = isAiSuperResolutionLevel(superResolution) && !this.aiSuperResolutionAvailable;
     if (job?.strategy === 'on-demand') {
       const completedSeconds = [...(job.completedSegmentIndexes ?? [])]
         .reduce((total, index) => total + segmentDuration(job, index), 0);
@@ -797,6 +996,8 @@ export class TranscodeManager {
         generationState: remainingSeconds <= 0
           ? 'complete'
           : (job.segmentProcesses?.size ?? 0) > 0 ? 'processing' : 'waiting',
+        generationStage: job.segmentStages?.values().next().value,
+        enhancementBackend: isAiSuperResolutionLevel(superResolution) ? AI_BACKEND_NAME : 'FFmpeg zscale + CAS',
         strategy: 'on-demand',
         seekable: true,
         error: job.error,
@@ -817,6 +1018,7 @@ export class TranscodeManager {
             ? Math.max(0, item.duration - job.progressSeconds) / (job.progressSeconds / Math.max(0.001, (Date.now() - Date.parse(job.startedAt)) / 1_000))
             : undefined,
           generationState: job.state === 'ready' ? 'complete' : job.state === 'failed' ? 'failed' : 'processing',
+          enhancementBackend: isAiSuperResolutionLevel(superResolution) ? AI_BACKEND_NAME : 'FFmpeg zscale + CAS',
           strategy: 'eager',
           seekable: job.state === 'ready',
           error: job.error,
@@ -824,7 +1026,7 @@ export class TranscodeManager {
           plan,
         }
       : {
-          state: superResolution !== 'off' && !plan.available ? 'unavailable' : 'idle',
+          state: superResolution !== 'off' && (!plan.available || aiUnavailable) ? 'unavailable' : 'idle',
           mode,
           encoder: mode === 'transcode' ? this.encoder : 'copy',
           progressSeconds: 0,
@@ -834,9 +1036,10 @@ export class TranscodeManager {
           generationState: 'waiting',
           strategy: superResolution !== 'off' && item.duration > 0 ? 'on-demand' : 'eager',
           seekable: superResolution !== 'off' && item.duration > 0,
-          error: plan.reason,
+          error: aiUnavailable ? this.aiSuperResolutionReason : plan.reason,
           superResolution,
           plan,
+          enhancementBackend: isAiSuperResolutionLevel(superResolution) ? AI_BACKEND_NAME : 'FFmpeg zscale + CAS',
         };
   }
 

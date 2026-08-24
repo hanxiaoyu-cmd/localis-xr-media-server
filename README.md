@@ -16,7 +16,7 @@
   ![Windows 11](https://img.shields.io/badge/Windows_11-tested-B8FF5C?style=flat-square&labelColor=111311&color=B8FF5C)
   ![Vision Pro](https://img.shields.io/badge/Vision_Pro-zero_install-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
   ![WebXR](https://img.shields.io/badge/WebXR-VR180_%2F_360-B8FF5C?style=flat-square&labelColor=111311&color=B8FF5C)
-  ![Tests](https://img.shields.io/badge/tests-60_passing-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
+  ![Tests](https://img.shields.io/badge/tests-62_passing-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
 </div>
 
 ---
@@ -30,7 +30,7 @@ flowchart LR
   A[电脑本地文件夹] --> C[Localis for Windows]
   B[百度网盘 / 夸克网盘] --> C
   C --> D[Range 原文件直放]
-  C --> E[电脑端 FFmpeg 转码与超分]
+  C --> E[电脑端 FFmpeg / Real-ESRGAN 转码与超分]
   D --> F[当前局域网]
   E --> F
   F --> G[Vision Pro Safari]
@@ -41,7 +41,7 @@ flowchart LR
 - 视频文件、网盘凭据、转码缓存和 TLS 私钥全部留在电脑。
 - 头显不安装 Localis App，不运行超分算法，也不接收网盘登录凭据。
 - 浏览器能直接解码的文件走 HTTP Range；其余内容由电脑按需生成 H.264/AAC HLS。
-- 长电影的超分流拥有完整可拖动时间线，只生成当前播放位置附近的 4 秒分片。
+- 长电影的超分流拥有完整可拖动时间线，只生成当前播放位置附近的分片：传统档每段 4 秒，AI 档每段 1 秒。
 
 ## 三步开始
 
@@ -49,7 +49,7 @@ flowchart LR
 2. 在电脑上启动 Localis，并在 Windows 防火墙提示中允许“专用网络”。点击“添加媒体文件夹”，选择影片目录。
 3. 让头显和电脑连接同一个局域网。在头显浏览器中打开 Localis 左侧显示的地址，再输入同一位置的六位配对码。
 
-> Windows 版已经内置 Node.js 运行时、FFmpeg 与 ffprobe。普通用户不需要再安装命令行工具。当前安装包尚未购买代码签名证书，Windows SmartScreen 可能显示“未知发布者”；请只从本仓库 Release 下载并核对 SHA-256。
+> Windows 版已经内置 Node.js 运行时、FFmpeg、ffprobe、Real-ESRGAN NCNN Vulkan 与模型。普通用户不需要安装 Python、PyTorch、CUDA 或 Vulkan SDK。电脑仍需保留 Windows 正常工作的显卡驱动。当前安装包尚未购买代码签名证书，Windows SmartScreen 可能显示“未知发布者”；请只从本仓库 Release 下载并核对 SHA-256。
 
 ## 为空间视频而做
 
@@ -57,7 +57,7 @@ flowchart LR
 | --- | --- |
 | 本地媒体 | 递归扫描常见视频与音频；原生文件夹选择窗口；路径不发送到头显 |
 | 兼容播放 | MP4/WebM 等优先 Range 直放；MKV/TS/AVI/旧编码自动 remux 或转 H.264/AAC HLS |
-| 电脑端超分 | 关闭、标准 1.25×、高 1.5×、极致 2×；缩放与锐化只在电脑 FFmpeg 进程执行 |
+| 电脑端超分 | 关闭、标准 1.25×、高 1.5×、极致 2×、AI 清晰 2×；所有计算只在电脑执行 |
 | 长片跳转 | 完整 VOD 时间线立即返回；用户跳到哪里，电脑优先生成哪里的分片并显示缓存进度 |
 | VR / WebXR | 平面、VR180、VR360、Mono、SBS、TB、LR/RL；头显内播放、暂停、跳转与字幕面板 |
 | 字幕 | 外挂 SRT/VTT/ASS/SSA 与内封文本字幕统一转换为 WebVTT |
@@ -65,7 +65,7 @@ flowchart LR
 | 夸克网盘 | 电脑端安装官方组件、浏览器授权、搜索并完整下载到本地缓存后入库 |
 | 私人访问 | 六位配对码、HMAC 签名 HttpOnly Cookie、尝试限速、Host/Origin 校验与路径隐藏 |
 
-超分是高质量的空间缩放与锐化管线，不冒充 DLSS、FSR、Real-ESRGAN 或任何厂商认证的 AI 超分。SBS/TB 会逐眼独立处理，360° 内容使用环绕采样，避免眼间串色和经度接缝。
+“AI 清晰”使用随 EXE 携带的 Real-ESRGAN 通用视频模型，通过 NCNN Vulkan 在电脑显卡逐帧重建，再编码成标准 H.264 HLS；模型转换环境不随软件分发。为控制首段等待和临时空间，原生 4×模型接收映射到 1/2 尺寸的输入并直接产生 2×目标帧，0.5 降噪强度同时抑制压缩噪声。该档适合单目平面与 VR180；SBS/TB 和 VR360 暂使用传统档，后者会逐眼或环绕处理，避免眼间串色和经度接缝。Localis 的 AI 档不是 DLSS、RTX Video 或 FSR 的认证实现。
 
 ## 电脑端控制台
 
@@ -87,6 +87,7 @@ flowchart LR
 | H.264 + 不兼容音频 | 复制视频，只转 AAC 音频 |
 | MPEG-4 Part 2、VC-1 等不兼容视频 | H.264/AAC HLS |
 | 任意视频 + 标准/高/极致超分 | 电脑端按需缩放、锐化与 H.264/AAC MPEG-TS VOD HLS |
+| 单目平面/VR180 + AI 清晰 | 电脑端 Real-ESRGAN 逐帧重建、1 秒缓存分片与 H.264/AAC HLS |
 | SRT/VTT/ASS/SSA 文本字幕 | WebVTT |
 
 DRM、加密光盘、蓝光菜单、PGS/VobSub OCR 与专有加密容器不在当前范围。4K/6K/8K、HDR 和极致超分的效果取决于电脑编码能力、Wi-Fi 吞吐与头显解码器。
@@ -99,7 +100,7 @@ Localis 提供 Cloudflare DNS-01 证书脚本；媒体仍直接走局域网，�
 
 ## 从源码开发
 
-要求：Windows 11、Node.js 22.13+、FFmpeg/ffprobe 位于 `PATH`。仓库源码模式不会自动使用桌面安装包内的 FFmpeg。
+要求：Windows 11、Node.js 22.13+、FFmpeg/ffprobe 位于 `PATH`。仓库源码模式不会自动使用桌面安装包内的 FFmpeg；Windows 仓库包含用于测试与打包的 AI 运行时。
 
 ```powershell
 npm install
@@ -127,6 +128,8 @@ npm run package:win
 | `LOCALIS_CACHE_GB` | `20` | HLS 缓存上限 |
 | `LOCALIS_CLOUD_CACHE_GB` | `50` | 云盘源文件缓存上限 |
 | `LOCALIS_ENCODER` | 实际探测 | 强制 `h264_nvenc`、`h264_mf` 或 `libx264` |
+| `LOCALIS_AI_SR_PATH` | Windows 包内置 | 源码调试时覆盖 Real-ESRGAN NCNN 可执行文件 |
+| `LOCALIS_AI_SR_MODELS_PATH` | Windows 包内置 | 源码调试时覆盖 NCNN 模型目录 |
 | `LOCALIS_PAIR_CODE` | 每次随机 | 固定六位配对码，仅调试使用 |
 
 其余 TLS、百度开发者身份、夸克运行时和安全参数见 [.env.example](./.env.example)。
@@ -140,7 +143,7 @@ npm test
 npm run build
 ```
 
-自动化覆盖配对、Range、媒体扫描、字幕、原生文件夹选择、HLS 分流、完整时长 seek、电脑端四档超分、真实 FFmpeg 转码、SBS/TB 与 360°、云盘协议、容量保护和安全边界。生产页面还在真实 Chromium 中验证长电影远距离跳转与继续播放。
+自动化覆盖配对、Range、媒体扫描、字幕、原生文件夹选择、HLS 分流、完整时长 seek、电脑端五档超分、真实 Real-ESRGAN/FFmpeg 转码、SBS/TB 与 360°、云盘协议、容量保护和安全边界。生产页面还在真实 Chromium 中验证长电影远距离跳转与继续播放。
 
 最新环境、逐项结果与没有被伪装成“真机已测”的边界，记录在 [实际测试报告](./docs/TEST_REPORT.md)。Vision Pro、Quest、PICO 的最终设备验收请按 [头显验收清单](./docs/HEADSET_ACCEPTANCE.md) 执行。
 
@@ -149,7 +152,7 @@ npm run build
 - Localis 首版是只读媒体服务器，不上传、删除、移动或分享网盘文件。
 - 百度/夸克账号、Cookie、token、证书私钥和媒体路径不应出现在 Issue、日志截图或公开仓库中。
 - 当前 Localis 源码未采用开源许可证，保留所有权利；第三方组件仍各自遵循其许可证。
-- Windows 包含独立的 GPLv3 FFmpeg/ffprobe 二进制，其来源、许可与对应源码地址见 [第三方通知](./THIRD_PARTY_NOTICES.md)。
+- Windows 包含独立的 GPLv3 FFmpeg/ffprobe 以及 MIT/BSD-3-Clause Real-ESRGAN 运行时与模型，其来源和许可见 [第三方通知](./THIRD_PARTY_NOTICES.md)。
 
 提交问题前请阅读 [贡献指南](./CONTRIBUTING.md) 与 [安全策略](./SECURITY.md)。
 

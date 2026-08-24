@@ -22,6 +22,7 @@ assert.ok(health, `Localis did not become ready at ${baseUrl}`);
 assert.equal(health.ok, true);
 assert.equal(health.service, 'localis');
 assert.ok(Number(health.mediaCount) > 0, 'The packaged ffprobe did not scan the test media');
+assert.equal(health.aiSuperResolution?.available, true, 'The packaged AI runtime/model was not detected');
 
 const page = await fetch(baseUrl);
 assert.equal(page.status, 200);
@@ -70,6 +71,18 @@ assert.equal(transcodeStatus.superResolution, 'standard');
 assert.equal(transcodeStatus.plan.outputWidth, 1600);
 assert.equal(transcodeStatus.plan.outputHeight, 900);
 
+const aiPlaylist = await fetch(`${baseUrl}/api/media/${media.id}/hls/ai/index.m3u8`, authenticated);
+assert.equal(aiPlaylist.status, 200, 'Packaged server did not create the AI HLS playlist');
+assert.match(await aiPlaylist.text(), /#EXT-X-TARGETDURATION:1/);
+const aiSegment = await fetch(`${baseUrl}/api/media/${media.id}/hls/ai/seg_000000.ts`, authenticated);
+assert.equal(aiSegment.status, 200);
+const aiSegmentBytes = (await aiSegment.arrayBuffer()).byteLength;
+assert.ok(aiSegmentBytes > 10_000, 'Bundled Real-ESRGAN returned an empty segment');
+const aiStatus = await fetch(`${baseUrl}/api/media/${media.id}/hls/ai/status`, authenticated).then((response) => response.json());
+assert.equal(aiStatus.enhancementBackend, 'Real-ESRGAN NCNN Vulkan');
+assert.equal(aiStatus.plan.outputWidth, 2560);
+assert.equal(aiStatus.plan.outputHeight, 1440);
+
 let lanPairCodeHidden = null;
 if (lanUrl) {
   const lanStatus = await fetch(`${lanUrl}/api/pair/status`).then((response) => response.json());
@@ -85,4 +98,6 @@ process.stdout.write(`${JSON.stringify({
   lanPairCodeHidden,
   superResolution: `${media.width}x${media.height} -> ${transcodeStatus.plan.outputWidth}x${transcodeStatus.plan.outputHeight}`,
   segmentBytes,
+  aiSuperResolution: `${media.width}x${media.height} -> ${aiStatus.plan.outputWidth}x${aiStatus.plan.outputHeight}`,
+  aiSegmentBytes,
 })}\n`);

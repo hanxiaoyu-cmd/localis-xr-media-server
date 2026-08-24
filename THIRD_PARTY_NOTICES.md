@@ -34,6 +34,13 @@ Windows 发行包通过 `ffprobe-static@3.1.0` 携带 FFmpeg 项目的 ffprobe 4
 - Localis 不在仓库或 Windows 包内预装夸克官方网盘组件。只有用户在电脑端明确点击安装后，Localis 才把官方组件下载到系统应用数据目录。该组件采用其上游仓库声明的许可证。
 - 百度网盘接入使用用户自行申请并通过审核的开放平台应用身份；应用密钥不会随桌面发行包分发。
 
-## Super resolution description
+## Real-ESRGAN NCNN Vulkan AI super resolution
 
-Localis 当前电脑端超分由 FFmpeg 的空间缩放、环绕采样与锐化滤镜组成，没有复制 AMD FSR、NVIDIA DLSS、Real-ESRGAN 或其他神经超分项目源码，也不应描述为这些项目的认证实现或 AI 超分。
+Windows 发行包携带 Real-ESRGAN v0.2.5.0 的官方 `realesrgan-ncnn-vulkan` 独立运行时，以及由官方 `realesr-general-x4v3` 与 `realesr-general-wdn-x4v3` 权重以 0.5 降噪强度融合、转换得到的 NCNN 模型。Localis 通过独立子进程调用它；Python、PyTorch、CUDA 和模型转换工具不进入发行包。
+
+- Runtime and model release: https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0
+- Real-ESRGAN source and model license: BSD-3-Clause
+- `realesrgan-ncnn-vulkan` runtime license: MIT
+- Preserved license text: `desktop/vendor/realesrgan/LICENSE-REAL-ESRGAN-BSD-3.txt` and `desktop/vendor/realesrgan/LICENSE-NCNN-VULKAN-MIT.txt`
+
+标准、高与极致档仍使用 FFmpeg 的空间缩放、环绕采样与锐化滤镜；只有明确选择“AI 清晰”时才运行上述神经网络。此实现不是 NVIDIA DLSS/RTX Video、AMD FSR 或任何硬件厂商的认证实现。

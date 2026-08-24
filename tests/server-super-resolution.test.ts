@@ -11,6 +11,7 @@ describe('computer-side super-resolution profiles', () => {
   it('accepts only explicit profile names', () => {
     expect(parseServerSuperResolutionLevel('standard')).toBe('standard');
     expect(parseServerSuperResolutionLevel('ultra')).toBe('ultra');
+    expect(parseServerSuperResolutionLevel('ai')).toBe('ai');
     expect(parseServerSuperResolutionLevel('auto')).toBe('off');
     expect(parseServerSuperResolutionLevel('../ultra')).toBe('off');
   });
@@ -21,6 +22,7 @@ describe('computer-side super-resolution profiles', () => {
     expect(serverSuperResolutionPlan(item, 'standard')).toMatchObject({ outputWidth: 1600, outputHeight: 900, activeMode: 'upscale' });
     expect(serverSuperResolutionPlan(item, 'high')).toMatchObject({ outputWidth: 1920, outputHeight: 1080, activeMode: 'upscale' });
     expect(serverSuperResolutionPlan(item, 'ultra')).toMatchObject({ outputWidth: 2560, outputHeight: 1440, activeMode: 'upscale' });
+    expect(serverSuperResolutionPlan(item, 'ai')).toMatchObject({ outputWidth: 2560, outputHeight: 1440, activeMode: 'upscale' });
     const square = serverSuperResolutionPlan({ width: 4096, height: 4096, frameRate: 30, sampleAspectRatio: '1:1', stereo: 'mono' }, 'ultra');
     expect(square).toMatchObject({ available: false, enabled: false, activeMode: 'off' });
     expect(square.reason).toMatch(/Level 5\.2/);
@@ -101,6 +103,27 @@ describe('computer-side super-resolution profiles', () => {
     expect(sphericalSbs.filterComplex).toBeUndefined();
     expect(sphericalSbs.filters?.join(',')).toContain('v360=input=equirect:output=equirect:in_stereo=sbs:out_stereo=sbs:w=960:h=960:interp=lanczos');
     expect(sphericalSbs.filters?.join(',')).not.toContain('cas=');
+  });
+
+  it('bounds AI reconstruction to seam-safe source layouts', () => {
+    const flat = serverSuperResolutionPlan({
+      width: 1280, height: 720, sampleAspectRatio: '1:1', stereo: 'mono', frameRate: 30, projection: 'flat',
+    }, 'ai');
+    expect(flat).toMatchObject({ available: true, outputWidth: 2560, outputHeight: 1440 });
+
+    const stereo = serverSuperResolutionPlan({
+      width: 1920, height: 1080, sampleAspectRatio: '1:1', stereo: 'sbs', frameRate: 30, projection: 'equirect180',
+    }, 'ai');
+    expect(stereo).toMatchObject({ available: false, activeMode: 'off' });
+    expect(stereo.reason).toMatch(/SBS\/TB/);
+
+    const spherical = serverSuperResolutionPlan({
+      width: 1920, height: 960, sampleAspectRatio: '1:1', stereo: 'mono', frameRate: 30, projection: 'equirect360',
+    }, 'ai');
+    expect(spherical).toMatchObject({ available: false, activeMode: 'off' });
+    expect(() => buildVideoPipeline({
+      width: 1280, height: 720, sampleAspectRatio: '1:1', stereo: 'mono', frameRate: 30, projection: 'flat',
+    }, 'ai', 'yuv420p')).toThrow(/Real-ESRGAN/);
   });
 
   it('uses host-side zscale and CAS and caps high frame rates', () => {

@@ -40,6 +40,7 @@ export async function loadConfig(): Promise<LocalisConfig> {
   const projectRoot = process.cwd();
   const dataDir = path.resolve(process.env.LOCALIS_DATA_DIR || getDefaultDataDir());
   const cacheDir = path.join(dataDir, 'cache');
+  const bundledAiRoot = path.join(projectRoot, 'desktop', 'vendor', 'realesrgan');
   const configPath = path.join(dataDir, 'config.json');
   await mkdir(cacheDir, { recursive: true });
 
@@ -91,6 +92,10 @@ export async function loadConfig(): Promise<LocalisConfig> {
     allowedHosts: [...allowedHosts],
     ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
     ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
+    aiSuperResolutionPath: process.env.LOCALIS_AI_SR_PATH
+      || (process.platform === 'win32' ? path.join(bundledAiRoot, 'realesrgan-ncnn-vulkan.exe') : undefined),
+    aiSuperResolutionModelsPath: process.env.LOCALIS_AI_SR_MODELS_PATH
+      || (process.platform === 'win32' ? path.join(bundledAiRoot, 'models') : undefined),
     maxTranscodes: Math.max(1, Number(process.env.LOCALIS_MAX_TRANSCODES || 2)),
     maxCacheBytes: Math.max(1, Number(process.env.LOCALIS_CACHE_GB || 20)) * 1024 ** 3,
     cloudCacheBytes: Math.max(1, Number(process.env.LOCALIS_CLOUD_CACHE_GB || 50)) * 1024 ** 3,
