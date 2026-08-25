@@ -44,6 +44,9 @@ describe('media metadata', () => {
       videoCodec: 'h264',
       videoProfile: 'High 10',
       pixelFormat: 'yuv420p10le',
+      bitDepth: 10,
+      dynamicRange: 'unknown',
+      compatibilityMode: 'video-transcode',
     });
     expect(items.find((item) => item.title === 'common-format')).toMatchObject({ kind: 'video', directPlay: false });
     expect(items.find((item) => item.title === 'common-audio')).toMatchObject({ kind: 'audio', audioCodec: 'ac3', directPlay: false });

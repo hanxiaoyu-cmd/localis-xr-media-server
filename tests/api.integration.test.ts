@@ -186,6 +186,53 @@ describe('Localis API', () => {
     ]));
   });
 
+  it('keeps adaptive off remuxing but forces the client-safety route through H.264/AAC', async () => {
+    const listed = deps.library.list().find((candidate) => candidate.title === 'flat-remux')!;
+    const item = deps.library.get(listed.id)!;
+    expect(deps.transcodes.decideMode(item, 'off')).toBe('remux');
+    expect(deps.transcodes.decideMode(item, 'off', true)).toBe('transcode');
+
+    const pending = await host(request(api).get(`/api/media/${item.id}/hls/compat/status`)).expect(200);
+    expect(pending.body).toMatchObject({ state: 'idle', mode: 'transcode', forcedCompatibility: true });
+
+    const playlist = await host(request(api).get(`/api/media/${item.id}/hls/compat/index.m3u8`)).expect(200);
+    expect(playlist.text).toContain('#EXTM3U');
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      if (deps.transcodes.statusForItem(item, 'off', true).state === 'ready') break;
+      await wait(100);
+    }
+
+    const status = deps.transcodes.statusForItem(item, 'off', true);
+    expect(status).toMatchObject({ state: 'ready', mode: 'transcode', forcedCompatibility: true });
+    const forcedJob = deps.transcodes.jobForItem(item, 'off', true)!;
+    expect(forcedJob).toBeTruthy();
+    expect(deps.transcodes.jobForItem(item, 'off')).toBeUndefined();
+    await host(request(api).get(`/api/media/${item.id}/hls/compat/init.mp4`)).expect(200);
+
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'stream=codec_name,codec_type,pix_fmt,width,height,avg_frame_rate',
+      '-of', 'json', forcedJob.playlistPath,
+    ], { windowsHide: true });
+    const streams = (JSON.parse(stdout) as {
+      streams: Array<{
+        codec_name: string;
+        codec_type: string;
+        pix_fmt?: string;
+        width?: number;
+        height?: number;
+        avg_frame_rate?: string;
+      }>;
+    }).streams;
+    const video = streams.find((stream) => stream.codec_type === 'video')!;
+    const audio = streams.find((stream) => stream.codec_type === 'audio')!;
+    const [fpsNumerator, fpsDenominator] = (video.avg_frame_rate || '0/1').split('/').map(Number);
+    expect(video).toMatchObject({ codec_name: 'h264', pix_fmt: 'yuv420p' });
+    expect(Math.max(video.width || 0, video.height || 0)).toBeLessThanOrEqual(4096);
+    expect(fpsNumerator / fpsDenominator).toBeLessThanOrEqual(60);
+    expect(audio.codec_name).toBe('aac');
+  });
+
   it('detects HDR10 and tone-maps the compatibility stream to tagged SDR BT.709', async () => {
     const listed = deps.library.list().find((candidate) => candidate.title === 'hdr10-source')!;
     const item = deps.library.get(listed.id)!;
@@ -388,6 +435,12 @@ describe('Localis API', () => {
 
   it('transcodes H.264 High10 instead of remuxing the same incompatible pixel format', async () => {
     const item = deps.library.list().find((candidate) => candidate.title === 'high10-incompatible')!;
+    expect(item).toMatchObject({
+      bitDepth: 10,
+      dynamicRange: 'unknown',
+      compatibilityMode: 'video-transcode',
+    });
+    expect(item.compatibilityReason).toMatch(/无法可靠判定 HDR\/SDR/);
     expect(deps.transcodes.decideMode(deps.library.get(item.id)!)).toBe('transcode');
     await host(request(api).get(`/api/media/${item.id}/hls/index.m3u8`)).expect(200);
     for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -449,10 +502,18 @@ describe('Localis API', () => {
       const mode = transcodes.decideMode(item);
       expect(mode).toBe('remux');
 
-      const keyFor = (schema: string) => createHash('sha256')
+      const keyFor = (schema: string, includeIntent = false) => createHash('sha256')
         .update([
-          schema, item.id, item.size, item.modifiedAt, mode, 'off', item.projection,
-          item.stereo, item.sampleAspectRatio || '1:1', 'copy',
+          schema, item.id, item.size, item.modifiedAt, mode, 'off',
+          ...(includeIntent ? ['adaptive'] : []), item.projection,
+          item.stereo, item.sampleAspectRatio || '1:1',
+          item.dynamicRange ?? 'missing-dynamic-range',
+          item.bitDepth ?? 'missing-bit-depth',
+          item.colorPrimaries ?? 'missing-color-primaries',
+          item.colorTransfer ?? 'missing-color-transfer',
+          item.colorSpace ?? 'missing-color-space',
+          item.colorRange ?? 'missing-color-range',
+          'copy',
         ].join('|'))
         .digest('hex')
         .slice(0, 32);
@@ -475,10 +536,21 @@ describe('Localis API', () => {
       ]);
 
       const job = await transcodes.ensure(item);
-      expect(job.key).toBe(keyFor(TRANSCODE_CACHE_SCHEMA));
+      expect(job.key).toBe(keyFor(TRANSCODE_CACHE_SCHEMA, true));
       expect(job.key).not.toBe(legacyKey);
       expect(job.directory).not.toBe(legacyDirectory);
       expect(await readFile(path.join(legacyDirectory, 'index.m3u8'), 'utf8')).toContain('legacy-v3-cache');
+
+      for (const signalPatch of [
+        { dynamicRange: 'sdr10' as const },
+        { bitDepth: (item.bitDepth || 8) + 2 },
+        { colorPrimaries: 'bt2020' },
+        { colorTransfer: 'smpte2084' },
+        { colorSpace: 'bt2020nc' },
+        { colorRange: item.colorRange === 'pc' ? 'tv' : 'pc' },
+      ]) {
+        expect(transcodes.jobForItem({ ...item, ...signalPatch })).toBeUndefined();
+      }
     } finally {
       transcodes.shutdown();
       await wait(100);

@@ -7,10 +7,44 @@ import type { PlaybackProgress, PublicMediaItem } from '@/server/types';
 import type { ServerSuperResolutionLevel, ServerSuperResolutionPlan } from '@/server/super-resolution';
 import { XrVideoStage, type XrDiagnostics, type XrVideoOptions } from '@/app/lib/xr-video-stage';
 import { chooseHlsTransport } from '@/app/lib/hls-transport';
+import { savedServerSuperResolution } from '@/app/lib/server-super-resolution-preference';
+import {
+  probeBrowserMediaCapability,
+  type BrowserMediaCapabilityResult,
+  type ClientMediaDecodingConfiguration,
+} from '@/app/lib/browser-media-capability';
+import {
+  createGuidedUserDeviceDisplayProfile,
+  getOrCreateDeviceDisplayInstallationId,
+  resetDeviceDisplayCapabilityStore,
+  resolveDeviceDisplayCapabilityGrant,
+  revokeDeviceDisplayCapabilityProfile,
+  upsertDeviceDisplayCapabilityProfile,
+  type DeviceDisplayCapabilityResolution,
+  type DeviceDisplayEnvironment,
+  type DeviceDisplayStorage,
+  type ExactDisplayMediaInput,
+  type VerifiedDisplayDynamicRange,
+} from '@/app/lib/device-display-capability';
+import {
+  buildDeviceDisplayEnvironment,
+  buildExactDisplayMediaInput,
+  type DeviceBrowserName,
+} from '@/app/lib/device-display-environment';
+import {
+  describePlaybackPath,
+  type PlaybackPresentationAssurance,
+} from '@/app/lib/playback-path-label';
+import { hlsPlaybackUrls } from '@/app/lib/hls-playback-url';
+import {
+  qualifiesXrOriginalSample,
+  type XrOriginalSamplePoint,
+} from '@/app/lib/xr-original-sample';
 
 interface TranscodeStatus {
   state: string;
   mode: string;
+  forcedCompatibility?: boolean;
   encoder: string;
   progressSeconds: number;
   error?: string;
@@ -54,17 +88,26 @@ function clock(seconds: number) {
   return `${minutes}:${String(whole % 60).padStart(2, '0')}`;
 }
 
-const serverSuperResolutionLevels = new Set<ServerSuperResolutionLevel>(['off', 'standard', 'high', 'ultra', 'ai']);
-
 function savedSuperResolution(): ServerSuperResolutionLevel {
-  if (typeof window === 'undefined') return 'standard';
-  const saved = window.localStorage.getItem('localis.serverSuperResolution');
-  if (saved && serverSuperResolutionLevels.has(saved as ServerSuperResolutionLevel)) return saved as ServerSuperResolutionLevel;
-  const legacy = window.localStorage.getItem('localis.superResolution');
-  if (legacy === 'off') return 'off';
-  if (legacy === 'quality') return 'high';
-  return 'standard';
+  return savedServerSuperResolution(typeof window === 'undefined' ? undefined : window.localStorage);
 }
+
+interface ResolvedDisplayProfileState {
+  status: 'resolved';
+  installationId: string;
+  environment: DeviceDisplayEnvironment;
+  media: ExactDisplayMediaInput;
+  browserName: DeviceBrowserName;
+  resolution: DeviceDisplayCapabilityResolution;
+}
+
+interface UnavailableDisplayProfileState {
+  status: 'unavailable';
+  reason: string;
+  resettable: boolean;
+}
+
+type DisplayProfileState = ResolvedDisplayProfileState | UnavailableDisplayProfileState;
 
 function superResolutionLabel(level: ServerSuperResolutionLevel) {
   return level === 'standard' ? '标准' : level === 'high' ? '高' : level === 'ultra' ? '极致' : level === 'ai' ? 'AI 清晰' : '关闭';
@@ -90,8 +133,101 @@ function dynamicRangeLabel(item: Pick<PublicMediaItem, 'dynamicRange' | 'bitDept
   const range = item.dynamicRange === 'dolby-vision' ? '杜比视界'
     : item.dynamicRange === 'hdr10' ? 'HDR10'
       : item.dynamicRange === 'hlg' ? 'HLG'
-        : 'SDR';
+        : item.dynamicRange === 'sdr10' ? '高位深 SDR'
+          : item.dynamicRange === 'unknown' || item.dynamicRange === undefined ? '未知色彩范围'
+            : 'SDR';
   return item.bitDepth ? `${range} · ${item.bitDepth}-bit` : range;
+}
+
+function compatibilityNoticeLabel(item: Pick<PublicMediaItem, 'dynamicRange' | 'compatibilityMode'>) {
+  return item.dynamicRange === 'dolby-vision' ? '杜比视界兼容'
+    : item.dynamicRange === 'unknown' || item.dynamicRange === undefined ? '色彩未知兼容'
+      : item.dynamicRange === 'sdr10' ? '高位深兼容'
+        : item.compatibilityMode === 'tone-map' ? 'HDR → SDR'
+          : '电脑端兼容';
+}
+
+function displayProfileRelevant(item: PublicMediaItem) {
+  return item.kind === 'video'
+    && (item.dynamicRange !== 'sdr' || Boolean(item.bitDepth && item.bitDepth > 8));
+}
+
+function isGuidedDisplayRange(range: PublicMediaItem['dynamicRange']): range is VerifiedDisplayDynamicRange {
+  return range === 'hdr10' || range === 'hlg' || range === 'sdr10';
+}
+
+function prepareDisplayProfile(
+  item: PublicMediaItem,
+  storage: DeviceDisplayStorage,
+  browser: { origin: string; userAgent: string; platform: string },
+): DisplayProfileState | undefined {
+  if (!displayProfileRelevant(item)) return undefined;
+  if (!isGuidedDisplayRange(item.dynamicRange)) {
+    return {
+      status: 'unavailable',
+      resettable: false,
+      reason: item.dynamicRange === 'dolby-vision'
+        ? '杜比视界不能通过本地目视确认获得持久授权；默认使用未认证的 8-bit 兼容流。'
+        : '源色彩范围未知或不受支持，不能保存设备显示确认。',
+    };
+  }
+
+  const environment = buildDeviceDisplayEnvironment(browser);
+  if (!environment.ok) return { status: 'unavailable', reason: environment.detail, resettable: false };
+  const media = buildExactDisplayMediaInput(item);
+  if (!media.ok) return { status: 'unavailable', reason: media.detail, resettable: false };
+  const installation = getOrCreateDeviceDisplayInstallationId(storage);
+  if (!installation.ok) {
+    return {
+      status: 'unavailable',
+      reason: `设备显示档案不可用：${installation.detail}`,
+      resettable: installation.reason === 'corrupt' || installation.reason === 'unknown-schema',
+    };
+  }
+  return {
+    status: 'resolved',
+    installationId: installation.value,
+    environment: environment.environment,
+    media: media.media,
+    browserName: environment.browserName,
+    resolution: resolveDeviceDisplayCapabilityGrant(storage, {
+      installationId: installation.value,
+      environment: environment.environment,
+      media: media.media,
+    }),
+  };
+}
+
+function displayProfileMessage(state: DisplayProfileState) {
+  if (state.status === 'unavailable') return state.reason;
+  if (state.resolution.granted) {
+    const source = state.resolution.grant.evidenceSource === 'guided-user'
+      ? '本设备人工确认（非仪器验证）'
+      : state.resolution.grant.evidenceSource === 'instrumented' ? '仪器验证' : '厂商认证';
+    return `${source}，有效至 ${new Date(state.resolution.grant.expiresAt).toLocaleDateString('zh-CN')}。`;
+  }
+  const messages: Partial<Record<typeof state.resolution.reason, string>> = {
+    'no-profile': '这台设备尚未确认过这一精确原片。',
+    expired: '本片的设备确认已过期，需要重新完成真机观察。',
+    revoked: '本片的设备确认已撤销。',
+    'browser-major-changed': '浏览器主版本已变化，需要重新完成真机观察。',
+    'browser-engine-mismatch': '浏览器引擎已变化，旧确认不再适用。',
+    'origin-mismatch': '当前 HTTPS 来源已变化，旧确认不再适用。',
+    'platform-mismatch': '设备平台已变化，旧确认不再适用。',
+    'pipeline-version-mismatch': '播放器呈现管线已变化，需要重新确认。',
+    'media-mismatch': '片源或投影参数已变化，需要重新确认。',
+    'storage-corrupt': '本地设备档案已损坏；请显式重置后再确认。',
+    'unknown-schema': '本地设备档案版本无法识别；请显式重置。',
+  };
+  return messages[state.resolution.reason] || '当前设备档案未通过完整绑定校验，保持安全兼容流。';
+}
+
+function presentationAssurance(result?: BrowserMediaCapabilityResult): PlaybackPresentationAssurance {
+  const source = result?.evidence.presentationGrant?.evidenceSource;
+  return source === 'guided-user' ? 'guided-user'
+    : source === 'instrumented' ? 'instrumented'
+      : source === 'vendor-attested' ? 'vendor'
+        : 'unverified';
 }
 
 export function MediaPlayer({ mediaId }: { mediaId: string }) {
@@ -99,12 +235,13 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
   const stageRef = useRef<XrVideoStage | undefined>(undefined);
   const hlsRef = useRef<Hls | undefined>(undefined);
   const progressSentAt = useRef(0);
-  const directFailed = useRef(false);
   const resumePosition = useRef<number | undefined>(undefined);
   const resumePlaying = useRef(false);
   const resumeRetryTimer = useRef<number | undefined>(undefined);
   const seekCommitTimer = useRef<number | undefined>(undefined);
   const scrubTargetRef = useRef<number | undefined>(undefined);
+  const xrOriginalSampleStartedAt = useRef<XrOriginalSamplePoint | undefined>(undefined);
+  const transportRef = useRef<'direct' | 'hls'>('hls');
   const xrOptionsRef = useRef<XrVideoOptions>({ projection: 'flat', stereo: 'mono', eyeOrder: 'lr', yawOffset: 0 });
   const [data, setData] = useState<MediaResponse>();
   const [transport, setTransport] = useState<'direct' | 'hls'>('hls');
@@ -112,26 +249,93 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
   const [status, setStatus] = useState('正在读取媒体…');
   const [xrSupported, setXrSupported] = useState(false);
   const [enteringXr, setEnteringXr] = useState(false);
+  const [xrSessionActive, setXrSessionActive] = useState(false);
+  const [xrOriginalSampleReady, setXrOriginalSampleReady] = useState(false);
   const [diagnostics, setDiagnostics] = useState<XrDiagnostics>();
+  const [clientCapability, setClientCapability] = useState<BrowserMediaCapabilityResult>();
+  const [displayProfile, setDisplayProfile] = useState<DisplayProfileState>();
+  const [directPlaybackFailed, setDirectPlaybackFailed] = useState(false);
   const [superResolution, setSuperResolution] = useState<ServerSuperResolutionLevel>(() => savedSuperResolution());
   const [serverEnhancement, setServerEnhancement] = useState<TranscodeStatus>();
   const [playback, setPlayback] = useState({ paused: true, currentTime: 0, duration: 0, muted: false });
   const [scrubTarget, setScrubTarget] = useState<number>();
 
+  const selectTransport = useCallback((next: 'direct' | 'hls') => {
+    transportRef.current = next;
+    if (next !== 'direct') {
+      xrOriginalSampleStartedAt.current = undefined;
+      setXrOriginalSampleReady(false);
+    }
+    setTransport(next);
+  }, []);
+
   const load = useCallback(async () => {
     try {
-      directFailed.current = false;
+      setDirectPlaybackFailed(false);
+      setXrOriginalSampleReady(false);
       const response = await getJson<MediaResponse>(`/api/media/${mediaId}`);
+      let currentDisplayProfile: DisplayProfileState | undefined;
+      try {
+        const userAgentData = navigator as Navigator & { userAgentData?: { platform?: string } };
+        currentDisplayProfile = prepareDisplayProfile(response.item, window.localStorage, {
+          origin: window.location.origin,
+          userAgent: navigator.userAgent,
+          platform: userAgentData.userAgentData?.platform || navigator.platform,
+        });
+      } catch (cause) {
+        currentDisplayProfile = displayProfileRelevant(response.item)
+          ? {
+              status: 'unavailable',
+              resettable: false,
+              reason: cause instanceof Error ? `设备显示档案不可用：${cause.message}` : '设备显示档案不可用。',
+            }
+          : undefined;
+      }
+      const presentationGrant = currentDisplayProfile?.status === 'resolved'
+        && currentDisplayProfile.resolution.granted
+        ? currentDisplayProfile.resolution.grant
+        : undefined;
+      const presentationGrantRequest = currentDisplayProfile?.status === 'resolved'
+        ? {
+            installationId: currentDisplayProfile.installationId,
+            environment: currentDisplayProfile.environment,
+            media: currentDisplayProfile.media,
+          }
+        : undefined;
+      const probeElement = document.createElement(response.item.kind === 'audio' ? 'audio' : 'video');
+      const mediaCapabilities = window.navigator.mediaCapabilities;
+      const capability = await probeBrowserMediaCapability(response.item, {
+        canPlayType: (contentType) => probeElement.canPlayType(contentType),
+        decodingInfo: mediaCapabilities?.decodingInfo
+          ? async (configuration: ClientMediaDecodingConfiguration) => {
+              const result = await mediaCapabilities.decodingInfo(configuration as MediaDecodingConfiguration);
+              return {
+                supported: result.supported,
+                smooth: result.smooth,
+                powerEfficient: result.powerEfficient,
+              };
+            }
+          : undefined,
+        presentationGrant,
+        presentationGrantRequest,
+      });
       setData(response);
+      setDisplayProfile(currentDisplayProfile);
+      setClientCapability(capability);
       const level = savedSuperResolution();
       setSuperResolution(level);
       const enhanced = response.item.kind === 'video' && level !== 'off';
-      setTransport(enhanced || !response.item.directPlay ? 'hls' : 'direct');
-      setStatus(enhanced ? enhancedPreparingStatus(level) : response.item.directPlay ? '原始文件直连' : '正在准备兼容流…');
+      const originalSupported = capability.decision.canAttemptOriginal;
+      selectTransport(enhanced || !originalSupported ? 'hls' : 'direct');
+      setStatus(enhanced
+        ? enhancedPreparingStatus(level)
+        : originalSupported
+          ? response.item.directPlay ? '原片优先 · 浏览器安全直连' : '原片优先 · 当前设备确认可尝试'
+          : '正在准备兼容流…');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '媒体不存在');
     }
-  }, [mediaId]);
+  }, [mediaId, selectTransport]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0);
@@ -143,7 +347,14 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
   const mediaItemKind = data?.item.kind;
   const mediaProjection = data?.item.projection;
   const mediaStereo = data?.item.stereo;
-  const hlsUrl = mediaItemId ? `/api/media/${mediaItemId}/hls/${mediaItemKind === 'video' ? superResolution : 'off'}/index.m3u8` : undefined;
+  const hlsPlayback = mediaItemId ? hlsPlaybackUrls({
+    mediaId: mediaItemId,
+    superResolution: mediaItemKind === 'video' ? superResolution : 'off',
+    requiresForcedVideoTranscode: clientCapability?.decision.requiresForcedVideoTranscode,
+    directPlaybackFailed,
+  }) : undefined;
+  const hlsUrl = hlsPlayback?.manifestUrl;
+  const hlsStatusUrl = hlsPlayback?.statusUrl;
 
   useEffect(() => {
     const video = videoRef.current;
@@ -204,7 +415,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
           if (!ready || controller.signal.aborted) {
             return;
           }
-          const transcodeStatus = await getJson<TranscodeStatus>(`/api/media/${mediaItemId}/hls/${mediaItemKind === 'video' ? superResolution : 'off'}/status`);
+          const transcodeStatus = await getJson<TranscodeStatus>(hlsStatusUrl!);
           if (!controller.signal.aborted) setServerEnhancement(transcodeStatus);
           if (hlsTransport === 'native') {
             video.src = hlsUrl;
@@ -243,16 +454,16 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
       hlsRef.current?.destroy();
       hlsRef.current = undefined;
     };
-  }, [hlsUrl, mediaItemId, mediaItemKind, mediaProjection, mediaStereo, streamUrl, superResolution, transport]);
+  }, [hlsStatusUrl, hlsUrl, mediaItemId, mediaItemKind, mediaProjection, mediaStereo, streamUrl, superResolution, transport]);
 
   useEffect(() => {
-    if (!mediaItemId || mediaItemKind !== 'video' || transport !== 'hls') return;
+    if (!hlsStatusUrl || mediaItemKind !== 'video' || transport !== 'hls') return;
     const controller = new AbortController();
     let timer: number | undefined;
     const poll = async () => {
       try {
         const response = await fetch(
-          `/api/media/${mediaItemId}/hls/${superResolution}/status`,
+          hlsStatusUrl,
           { credentials: 'include', cache: 'no-store', signal: controller.signal },
         );
         if (response.ok) {
@@ -270,7 +481,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [mediaItemId, mediaItemKind, superResolution, transport]);
+  }, [hlsStatusUrl, mediaItemKind, superResolution, transport]);
 
   useEffect(() => () => {
     if (seekCommitTimer.current !== undefined) window.clearTimeout(seekCommitTimer.current);
@@ -294,13 +505,36 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
     const video = videoRef.current;
     if (!video || !xrMediaId || xrMediaKind !== 'video') return;
     let active = true;
-    const stage = new XrVideoStage(video, xrOptionsRef.current);
+    setXrSessionActive(false);
+    const stage = new XrVideoStage(video, xrOptionsRef.current, (sessionActive) => {
+      if (!active) return;
+      setXrSessionActive(sessionActive);
+      if (sessionActive) {
+        const quality = video.getVideoPlaybackQuality?.();
+        xrOriginalSampleStartedAt.current = transportRef.current === 'direct'
+          ? { wallTime: Date.now(), mediaTime: video.currentTime, totalFrames: quality?.totalVideoFrames }
+          : undefined;
+      } else {
+        const sample = xrOriginalSampleStartedAt.current;
+        xrOriginalSampleStartedAt.current = undefined;
+        const quality = video.getVideoPlaybackQuality?.();
+        if (qualifiesXrOriginalSample(sample, {
+          wallTime: Date.now(),
+          mediaTime: video.currentTime,
+          totalFrames: quality?.totalVideoFrames,
+        }, transportRef.current === 'direct')) {
+          setXrOriginalSampleReady(true);
+        }
+      }
+      setDiagnostics(stage.diagnostics());
+    });
     stageRef.current = stage;
     void stage.isSupported().then((supported) => { if (active) setXrSupported(supported); }).catch(() => { if (active) setXrSupported(false); });
     const updateDiagnostics = () => setDiagnostics(stage.diagnostics());
     video.addEventListener('loadedmetadata', updateDiagnostics);
     return () => {
       active = false;
+      xrOriginalSampleStartedAt.current = undefined;
       video.removeEventListener('loadedmetadata', updateDiagnostics);
       stage.dispose();
       stageRef.current = undefined;
@@ -321,6 +555,9 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
       const response = await getJson<{ item: PublicMediaItem }>(`/api/media/${mediaId}`, { method: 'PATCH', body: JSON.stringify(patch) });
       setData((current) => current ? { ...current, item: response.item } : current);
       setError('');
+      if (patch.projection !== undefined || patch.stereo !== undefined) {
+        await load();
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法更新播放设置');
     }
@@ -435,23 +672,72 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
 
   const changeSuperResolution = (level: ServerSuperResolutionLevel) => {
     rememberPlaybackForSourceSwitch();
+    setDirectPlaybackFailed(false);
     window.localStorage.setItem('localis.serverSuperResolution', level);
     setError('');
     setSuperResolution(level);
-    setTransport(level === 'off' && data?.item.directPlay ? 'direct' : 'hls');
+    const originalSupported = clientCapability?.decision.canAttemptOriginal ?? data?.item.directPlay;
+    selectTransport(level === 'off' && originalSupported ? 'direct' : 'hls');
     setStatus(level === 'off' ? '正在切换原始画质…' : enhancedPreparingStatus(level));
   };
 
   const onMediaError = () => {
     const video = videoRef.current;
-    if (transport === 'direct' && !directFailed.current) {
-      directFailed.current = true;
-      setTransport('hls');
+    if (transport === 'direct' && !directPlaybackFailed) {
+      setDirectPlaybackFailed(true);
+      selectTransport('hls');
       setError('');
       setStatus('浏览器无法解码原文件，已切换兼容流…');
       return;
     }
     setError(video?.error ? `媒体错误 ${video.error.code}：${video.error.message}` : '播放失败');
+  };
+
+  const confirmDisplayProfile = async () => {
+    if (displayProfile?.status !== 'resolved' || !xrOriginalSampleReady) return;
+    const created = createGuidedUserDeviceDisplayProfile({
+      installationId: displayProfile.installationId,
+      environment: displayProfile.environment,
+      media: displayProfile.media,
+    });
+    if (!created.ok) {
+      setError(`无法保存设备确认：${created.detail}`);
+      return;
+    }
+    const written = upsertDeviceDisplayCapabilityProfile(window.localStorage, created.profile);
+    if (!written.ok) {
+      setError(`无法保存设备确认：${written.detail}`);
+      return;
+    }
+    rememberPlaybackForSourceSwitch();
+    setStatus('已保存本片的设备人工确认，正在重新验证播放路径…');
+    await load();
+  };
+
+  const revokeDisplayProfile = async () => {
+    if (displayProfile?.status !== 'resolved' || !displayProfile.resolution.granted) return;
+    const revoked = revokeDeviceDisplayCapabilityProfile(
+      window.localStorage,
+      displayProfile.resolution.grant.profileId,
+    );
+    if (!revoked.ok) {
+      setError(`无法撤销设备确认：${revoked.detail}`);
+      return;
+    }
+    rememberPlaybackForSourceSwitch();
+    setStatus('已撤销本片设备确认，正在切换安全兼容流…');
+    await load();
+  };
+
+  const resetDisplayProfiles = async () => {
+    const reset = resetDeviceDisplayCapabilityStore(window.localStorage);
+    if (!reset.ok) {
+      setError(`无法重置设备档案：${reset.detail}`);
+      return;
+    }
+    rememberPlaybackForSourceSwitch();
+    setStatus('设备显示档案已重置，正在恢复安全兼容策略…');
+    await load();
   };
 
   const enterXr = async () => {
@@ -475,7 +761,12 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
       secureContext: window.isSecureContext,
       userAgent: navigator.userAgent,
       xrSupported,
+      xrSessionActive,
+      xrOriginalSampleReady,
+      displayProfile,
       transport,
+      clientCapability,
+      forcedServerCompatibility: hlsPlayback?.forceCompatibility,
       serverSuperResolution: superResolution,
       item: data?.item,
       transcode: serverEnhancement ?? data?.transcode,
@@ -526,6 +817,24 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
   const precomputeEta = serverEnhancement?.etaSeconds && serverEnhancement.etaSeconds > 1
     ? `约 ${clock(serverEnhancement.etaSeconds)}`
     : undefined;
+  const playbackServerStatus = hlsPlayback?.forceCompatibility
+    ? { ...(serverEnhancement || {}), mode: 'transcode', forcedCompatibility: true }
+    : serverEnhancement;
+  const playbackPath = describePlaybackPath({
+    compatibility: {
+      directPlay: item.directPlay,
+      compatibilityMode: item.compatibilityMode,
+      compatibilityReason: item.compatibilityReason,
+      dynamicRange: item.dynamicRange,
+      bitDepth: item.bitDepth,
+      colorTransfer: item.colorTransfer,
+      audioCodec: item.audioCodec,
+    },
+    transport,
+    superResolution,
+    serverEnhancement: playbackServerStatus,
+    presentationAssurance: presentationAssurance(clientCapability),
+  });
 
   return (
     <main className="player-page">
@@ -546,8 +855,26 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
           onLoadedMetadata={onLoadedMetadata}
           onTimeUpdate={() => { saveProgress(false); if (scrubTargetRef.current === undefined) syncPlayback(); }}
           onPlay={syncPlayback}
-          onPlaying={() => { syncPlayback(); if (superResolution !== 'off') setStatus(enhancedReadyStatus(superResolution)); }}
-          onPause={() => { saveProgress(true); syncPlayback(); }}
+          onPlaying={() => {
+            syncPlayback();
+            if (superResolution !== 'off') setStatus(enhancedReadyStatus(superResolution));
+            if (xrSessionActive && transport === 'direct' && !xrOriginalSampleStartedAt.current) {
+              const quality = videoRef.current?.getVideoPlaybackQuality?.();
+              xrOriginalSampleStartedAt.current = {
+                wallTime: Date.now(),
+                mediaTime: videoRef.current?.currentTime ?? 0,
+                totalFrames: quality?.totalVideoFrames,
+              };
+            }
+          }}
+          onPause={() => {
+            if (xrSessionActive) xrOriginalSampleStartedAt.current = undefined;
+            saveProgress(true);
+            syncPlayback();
+          }}
+          onSeeking={() => {
+            if (xrSessionActive) xrOriginalSampleStartedAt.current = undefined;
+          }}
           onVolumeChange={syncPlayback}
           onDurationChange={syncPlayback}
           onSeeked={() => { scrubTargetRef.current = undefined; setScrubTarget(undefined); syncPlayback(); if (superResolution !== 'off') setStatus(enhancedReadyStatus(superResolution)); }}
@@ -610,13 +937,63 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
 
       {error && <div className="inline-error player-inline-error" role="alert">{error}<button onClick={() => setError('')}>关闭</button></div>}
 
+      {item.kind === 'video' && (
+        <section className={`playback-path playback-path-${playbackPath.kind} playback-path-${playbackPath.state}`} aria-label="当前影像链路">
+          <div><span>当前影像链路</span><strong>{playbackPath.label}</strong><em>{playbackPath.stateLabel}</em></div>
+          <p>{playbackPath.description}</p>
+          {clientCapability && <small>设备判断：{clientCapability.decision.reason}</small>}
+          {playbackPath.presentationAssuranceLabel && <small>呈现证据：{playbackPath.presentationAssuranceLabel}{playbackPath.presentationVerified ? ' · 已验证呈现' : ' · 不宣称已验证 HDR/10-bit'}</small>}
+        </section>
+      )}
+
+      {item.kind === 'video' && displayProfile && (
+        <section className={`display-profile ${displayProfile.status === 'resolved' && displayProfile.resolution.granted ? 'display-profile-granted' : ''}`} aria-label="设备原片显示确认">
+          <div>
+            <span>设备原片显示确认</span>
+            <strong>{displayProfile.status === 'resolved' && displayProfile.resolution.granted ? '本片已有档案' : '安全兼容优先'}</strong>
+          </div>
+          <p>{displayProfileMessage(displayProfile)}</p>
+          {displayProfile.status === 'resolved' && <small>
+            绑定 {displayProfile.browserName} {displayProfile.environment.browserMajor} · {displayProfile.environment.origin} · 当前完整媒体元数据指纹 · 最长 90 天。人工确认只代表观感可接受，不等同仪器验证 HDR。
+          </small>}
+          {displayProfile.status === 'resolved' && !displayProfile.resolution.granted && (
+            <div className="display-profile-guide">
+              <small>{xrOriginalSampleReady
+                ? '已完成连续原片 WebXR 观看。请仅在高光、暗部、色彩、渐变与双眼画面均可接受时保存。'
+                : xrSessionActive && transport === 'direct'
+                  ? '正在采样原片 WebXR 播放；请勿暂停或跳转，连续观看至少 10 秒后退出。'
+                  : transport !== 'direct'
+                    ? '先关闭电脑端增强并选择“尝试原始 HDR/10-bit”，再进入沉浸模式连续观看至少 10 秒。'
+                    : '进入沉浸模式连续播放至少 10 秒并退出后，才会开放本片确认。'}</small>
+              {xrOriginalSampleReady && <button className="mode-button display-profile-confirm" type="button" onClick={() => void confirmDisplayProfile()}>确认刚才观感并记住本片</button>}
+            </div>
+          )}
+          {displayProfile.status === 'resolved' && displayProfile.resolution.granted && (
+            <button className="mode-button" type="button" onClick={() => void revokeDisplayProfile()}>撤销本片确认</button>
+          )}
+          {(displayProfile.status === 'unavailable' && displayProfile.resettable)
+            || (displayProfile.status === 'resolved' && !displayProfile.resolution.granted
+              && (displayProfile.resolution.reason === 'storage-corrupt' || displayProfile.resolution.reason === 'unknown-schema'))
+            ? <button className="mode-button" type="button" onClick={() => void resetDisplayProfiles()}>重置设备档案</button>
+            : null}
+        </section>
+      )}
+
       {item.kind === 'video' && !item.directPlay && (
-        <section className={`compatibility-notice ${item.compatibilityMode === 'tone-map' ? 'hdr-notice' : ''}`} aria-label="媒体兼容性说明">
-          <div><span>{item.compatibilityMode === 'tone-map' ? 'HDR 安全播放' : '电脑端兼容'}</span><strong>{dynamicRangeLabel(item)}</strong></div>
-          <p>{item.compatibilityReason}</p>
+        <section className={`compatibility-notice ${item.dynamicRange !== 'sdr' ? 'hdr-notice' : ''}`} aria-label="媒体兼容性说明">
+          <div><span>{compatibilityNoticeLabel(item)}</span><strong>{dynamicRangeLabel(item)}</strong></div>
+          <p>{transport === 'direct' && clientCapability?.decision.canAttemptOriginal
+            ? `${clientCapability.decision.reason} 若原片加载失败，Localis 会自动切换到电脑端兼容流。`
+            : item.compatibilityReason}</p>
           <small>{item.compatibilityMode === 'tone-map'
-            ? '“兼容流”输出标准 SDR；“尝试原始 HDR”不会改动文件，但是否呈现 HDR 由当前头显浏览器决定。'
-            : '原文件不会被修改，转换结果只保存在电脑端私有缓存。'}</small>
+            ? item.dynamicRange === 'dolby-vision'
+              ? 'Localis 不执行 Dolby Vision 动态元数据重建；仅在基底传递函数明确时尝试映射，否则兼容流也不保证亮度与色彩正确。'
+              : '“兼容流”输出标准 SDR；“尝试原始 HDR”不会改动文件，但是否呈现 HDR 由当前头显浏览器决定。'
+            : item.dynamicRange === 'sdr10'
+              ? '兼容流使用抖动把 10/12-bit SDR 降为 8-bit SDR；可减轻色带，但位深损失不可逆。'
+              : item.dynamicRange === 'unknown'
+                ? '源色彩元数据不完整；兼容流只输出 8-bit H.264 色彩未知画面，不保证亮度、动态范围或色彩正确。'
+                : '原文件不会被修改，转换结果只保存在电脑端私有缓存。'}</small>
         </section>
       )}
 
@@ -628,13 +1005,13 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
           <label>电脑端超分<select aria-label="电脑端超分" value={superResolution} disabled={item.kind !== 'video'} onChange={(event) => changeSuperResolution(event.target.value as ServerSuperResolutionLevel)}><option value="off">关闭（可直连时为原片）</option><option value="standard">标准 · 最多 1.25×</option><option value="high">高 · 最多 1.5×</option><option value="ultra">极致 · 最多 2×</option><option value="ai">AI 清晰 · 完整预处理后播放</option></select></label>
           <label className="yaw-control">朝向<input aria-label="水平朝向" type="range" min="-3.15" max="3.15" step="0.05" value={item.yawOffset} onChange={(event) => void updateMedia({ yawOffset: Number(event.target.value) })} /></label>
           <button className="mode-button" onClick={() => void updateMedia({ yawOffset: 0 })}>重新居中</button>
-          <button className="mode-button" disabled={superResolution !== 'off'} onClick={() => { directFailed.current = transport === 'direct'; setTransport(transport === 'direct' ? 'hls' : 'direct'); }}>{superResolution !== 'off' ? '超分由电脑流式输出' : transport === 'direct' ? '使用兼容流' : item.compatibilityMode === 'tone-map' ? '尝试原始 HDR' : '尝试原文件'}</button>
+          <button className="mode-button" disabled={superResolution !== 'off'} onClick={() => { setDirectPlaybackFailed(false); selectTransport(transport === 'direct' ? 'hls' : 'direct'); }}>{superResolution !== 'off' ? '超分由电脑流式输出' : transport === 'direct' ? '使用兼容流' : displayProfileRelevant(item) ? '尝试原始 HDR/10-bit' : '尝试原文件'}</button>
           <button className="mode-button" onClick={exportDiagnostics}>导出诊断</button>
         </div>
         <button className="xr-button" disabled={!xrSupported || enteringXr || item.kind !== 'video'} onClick={() => void enterXr()}>{enteringXr ? '正在进入…' : xrSupported ? '进入沉浸模式' : '此环境不可用 WebXR'}</button>
       </section>
 
-      {item.kind === 'video' && <p className="super-resolution-note">超分与锐化完全由运行 Localis 的电脑完成；Vision Pro、Quest 和 PICO 只接收标准 H.264 HLS 并负责显示。AI 清晰使用随项目携带的 Real-ESRGAN/NCNN Vulkan 通用视频模型，先完整生成并缓存整部影片，达到 100% 后才开放播放；无需 Python、PyTorch 或 CUDA 环境。SBS/TB 与 VR360 暂使用其他档位，以避免眼间串色和环绕接缝。</p>}
+      {item.kind === 'video' && <p className="super-resolution-note">关闭电脑端增强时，浏览器明确支持的 SDR 原片优先直连；无法安全直连的素材以及所有增强档使用电脑端 H.264 HLS，并保留自动失败回退。AI 清晰使用随项目携带的 Real-ESRGAN/NCNN Vulkan 通用视频模型，先完整生成并缓存整部影片，达到 100% 后才开放播放；SBS/TB 与 VR360 暂使用其他档位，以避免眼间串色和环绕接缝。</p>}
 
       <section className="media-details">
         <div><span>时长</span><strong>{clock(item.duration)}</strong></div>

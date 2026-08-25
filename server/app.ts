@@ -463,14 +463,19 @@ export function createApiApp(deps: AppDependencies) {
     }
     return parseServerSuperResolutionLevel(raw);
   };
-  const hlsStatus = (req: Request, res: Response) => {
+  const hlsStatus = (req: Request, res: Response, forceCompatibility: boolean) => {
     const item = library.get(String(req.params.id));
     if (!item) return res.status(404).json({ error: 'media_not_found' });
     const level = requestedSuperResolution(req, res);
     if (!level) return;
-    res.json(transcodes.statusForItem(item, level));
+    res.json(transcodes.statusForItem(item, level, forceCompatibility));
   };
-  const hlsAsset = async (req: Request, res: Response, next: NextFunction) => {
+  const hlsAsset = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    forceCompatibility: boolean,
+  ) => {
     try {
       let item = library.get(String(req.params.id));
       if (!item) return res.status(404).json({ error: 'media_not_found' });
@@ -503,7 +508,9 @@ export function createApiApp(deps: AppDependencies) {
         // Repeated AI progress checks reuse the active job. The first request
         // already holds the cloud-cache lease until precompute finishes; do
         // not create one additional lease timer per second for a long movie.
-        job = item.sourceType !== 'local' ? transcodes.jobForItem(item, level) : undefined;
+        job = item.sourceType !== 'local'
+          ? transcodes.jobForItem(item, level, forceCompatibility)
+          : undefined;
         if (job?.state === 'failed') job = undefined;
         if (item.sourceType !== 'local' && !job) {
           if (!clouds) throw new CloudSourceError('cloud_manager_unavailable', '云盘管理器尚未启动。', 503);
@@ -524,13 +531,13 @@ export function createApiApp(deps: AppDependencies) {
           }
         }
         try {
-          if (!job) job = await transcodes.ensure(item, level);
+          if (!job) job = await transcodes.ensure(item, level, forceCompatibility);
         } catch (error) {
           if (!(error instanceof SourceChangedError) || item.sourceType !== 'local') throw error;
           await library.scan();
           item = library.get(String(req.params.id));
           if (!item) return res.status(404).json({ error: 'media_not_found' });
-          job = await transcodes.ensure(item, level);
+          job = await transcodes.ensure(item, level, forceCompatibility);
         } finally {
           if (releaseCloudLease) {
             if (job && (job.state === 'running' || job.state === 'preparing')) {
@@ -548,7 +555,7 @@ export function createApiApp(deps: AppDependencies) {
             }
           }
         }
-      } else job = transcodes.jobForItem(item, level);
+      } else job = transcodes.jobForItem(item, level, forceCompatibility);
       if (!job) {
         releaseSegmentCloudLease?.();
         return res.status(404).json({ error: 'hls_asset_not_ready' });
@@ -556,7 +563,7 @@ export function createApiApp(deps: AppDependencies) {
       transcodes.renew(job);
       const playlistWaitMs = job.strategy === 'precompute' ? 0 : 5_000;
       if (req.params.file === 'index.m3u8' && !await transcodes.waitForPlaylist(job, playlistWaitMs)) {
-        const status = transcodes.statusForItem(item, level);
+        const status = transcodes.statusForItem(item, level, forceCompatibility);
         return res.status(202).set('Retry-After', '1').json({
           state: job.state,
           stage: level === 'ai' ? 'ai-precompute' : 'transcode',
@@ -587,11 +594,17 @@ export function createApiApp(deps: AppDependencies) {
       pipeFile(res, asset, next);
     } catch (error) { next(error); }
   };
-  app.get('/api/media/:id/hls/:level/status', hlsStatus);
-  app.get('/api/media/:id/hls/:level/:file', hlsAsset);
+  // This path is deliberately encoded in the URL rather than a query string:
+  // native HLS clients resolve relative segment URLs without inheriting the
+  // manifest query. Keeping `compat` in the path makes every playlist, init,
+  // and segment request select the same forced-transcode job.
+  app.get('/api/media/:id/hls/compat/status', (req, res) => hlsStatus(req, res, true));
+  app.get('/api/media/:id/hls/compat/:file', (req, res, next) => hlsAsset(req, res, next, true));
+  app.get('/api/media/:id/hls/:level/status', (req, res) => hlsStatus(req, res, false));
+  app.get('/api/media/:id/hls/:level/:file', (req, res, next) => hlsAsset(req, res, next, false));
   // Legacy URLs remain available as the non-enhanced compatibility stream.
-  app.get('/api/media/:id/hls/status', hlsStatus);
-  app.get('/api/media/:id/hls/:file', hlsAsset);
+  app.get('/api/media/:id/hls/status', (req, res) => hlsStatus(req, res, false));
+  app.get('/api/media/:id/hls/:file', (req, res, next) => hlsAsset(req, res, next, false));
 
   app.put('/api/progress/:id', async (req, res, next) => {
     try {

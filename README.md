@@ -9,14 +9,14 @@
 
   Localis 是运行在 Windows 电脑上的私人局域网影院。Vision Pro、Quest、PICO 和手机无需安装 App，使用系统浏览器打开电脑显示的局域网地址，即可播放本地视频、音频、VR180、VR360 与 WebXR 内容。
 
-  [下载 Windows 版](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) · [查看测试报告](./docs/TEST_REPORT.md) · [头显验收清单](./docs/HEADSET_ACCEPTANCE.md)
+  [下载 Windows 版](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) · [查看测试报告](./docs/TEST_REPORT.md) · [后续路线图](./docs/ROADMAP.md) · [头显验收清单](./docs/HEADSET_ACCEPTANCE.md) · [P1 HDR / 10-bit 验收](./docs/P1_HDR_DEVICE_PROFILE_ACCEPTANCE.md)
 
   <br />
 
   ![Windows 11](https://img.shields.io/badge/Windows_11-tested-B8FF5C?style=flat-square&labelColor=111311&color=B8FF5C)
   ![Vision Pro](https://img.shields.io/badge/Vision_Pro-zero_install-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
   ![WebXR](https://img.shields.io/badge/WebXR-VR180_%2F_360-B8FF5C?style=flat-square&labelColor=111311&color=B8FF5C)
-  ![Tests](https://img.shields.io/badge/tests-67_passing-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
+  ![Tests](https://img.shields.io/badge/tests-263_passing-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
 </div>
 
 ---
@@ -59,7 +59,7 @@ flowchart LR
 | --- | --- |
 | 本地媒体 | 递归扫描常见视频与音频；原生文件夹选择窗口；路径不发送到头显 |
 | 兼容播放 | MP4/WebM 等优先 Range 直放；MKV/TS/AVI/旧编码自动 remux 或转 H.264/AAC HLS |
-| HDR 安全播放 | 识别 HDR10、HLG 与杜比视界；兼容流在电脑端显式映射为 SDR BT.709，原文件保持不变并保留设备端尝试入口 |
+| HDR / 高位深双路径 | HDR10、HLG 默认在电脑端映射为 8-bit SDR；10/12-bit SDR 显式抖动降位深；杜比视界与未知色彩不猜测正确呈现，原文件保持不变并保留实验尝试入口 |
 | 电脑端超分 | 关闭、标准 1.25×、高 1.5×、极致 2×、AI 清晰 2×；所有计算只在电脑执行 |
 | 长片跳转 | 完整 VOD 时间线立即返回；用户跳到哪里，电脑优先生成哪里的分片并显示缓存进度 |
 | VR / WebXR | 平面、VR180、VR360、Mono、SBS、TB、LR/RL；头显内播放、暂停、跳转与字幕面板 |
@@ -89,7 +89,8 @@ flowchart LR
 | H.264/AAC 位于 MKV/TS 等容器 | fMP4 HLS remux，不重新编码视频 |
 | H.264 + 不兼容音频 | 复制视频，只转 AAC 音频 |
 | MPEG-4 Part 2、VC-1 等不兼容视频 | H.264/AAC HLS |
-| HDR10、HLG、杜比视界 + 兼容流 | 电脑端 Hable 色调映射为 SDR BT.709 H.264；不声称保留 HDR/杜比视界输出 |
+| HDR10、HLG + 兼容流 | 电脑端 Hable 色调映射、抖动降为 8-bit SDR BT.709 H.264；不声称保留 HDR 输出 |
+| 杜比视界 / 色彩元数据未知 | 仅在基底传递函数明确时尝试映射；否则输出色彩未知的 8-bit H.264，不声称亮度或色彩正确 |
 | 任意视频 + 标准/高/极致超分 | 电脑端按需缩放、锐化与 H.264/AAC MPEG-TS VOD HLS |
 | 单目平面/VR180 + AI 清晰 | 电脑端 Real-ESRGAN 完整预处理；全部 4 秒分片完成后一次性开放 H.264/AAC HLS |
 | SRT/VTT/ASS/SSA 文本字幕 | WebVTT |

@@ -3,7 +3,7 @@ export type Projection = 'flat' | 'equirect180' | 'equirect360';
 export type StereoLayout = 'mono' | 'sbs' | 'tb';
 export type EyeOrder = 'lr' | 'rl';
 export type MediaSourceType = 'local' | 'webdav' | 'baidu';
-export type DynamicRange = 'sdr' | 'hdr10' | 'hlg' | 'dolby-vision';
+export type DynamicRange = 'sdr' | 'sdr10' | 'hdr10' | 'hlg' | 'dolby-vision' | 'unknown';
 export type CompatibilityMode = 'direct' | 'remux' | 'audio-transcode' | 'video-transcode' | 'tone-map';
 
 export interface MediaTrack {

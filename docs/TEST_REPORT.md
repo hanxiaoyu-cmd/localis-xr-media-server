@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | ESLint | 通过 | 全项目无 lint 错误或警告 |
 | TypeScript | 通过 | `tsc --noEmit` |
-| 单元/集成 | 12 个文件、62 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、完整时长 seek、电脑端五档超分、真实 AI/FFmpeg 转码、电脑端云盘工作台、云盘协议与安全边界 |
+| 单元/集成 | 21 个文件、263 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、完整时长 seek、电脑端五档超分、真实 AI/FFmpeg 转码、HDR/高位深分类、设备显示档案、播放路径标签、电脑端云盘工作台、云盘协议与安全边界 |
 | 生产构建 | 通过 | Vinext 五阶段 client/RSC/SSR 构建 |
 | 编码器探测 | 通过 | NVENC、Media Foundation、libx264 运行时真实编码探测；本机自动选择 NVENC |
 | NVENC 路径 | 通过 | 完整集成套件真实生成 H.264/yuv420p + AAC fMP4 HLS |
