@@ -1,4 +1,5 @@
 import type { MediaItem } from './types';
+import { isHdrDynamicRange } from './media-compatibility';
 
 export type ServerSuperResolutionLevel = 'off' | 'standard' | 'high' | 'ultra' | 'ai';
 
@@ -241,7 +242,7 @@ export function serverSuperResolutionPlan(
 }
 
 export function buildVideoFilters(
-  item: Pick<MediaItem, 'width' | 'height' | 'sampleAspectRatio' | 'stereo' | 'frameRate'>,
+  item: Pick<MediaItem, 'width' | 'height' | 'sampleAspectRatio' | 'stereo' | 'frameRate' | 'dynamicRange'>,
   level: ServerSuperResolutionLevel,
   pixelFormat: 'yuv420p' | 'nv12',
 ) {
@@ -250,7 +251,7 @@ export function buildVideoFilters(
   }
   const sourceFps = Math.max(1, item.frameRate || 30);
   const fps = Math.min(60, Math.max(1, item.frameRate || 60));
-  const filters: string[] = [];
+  const filters: string[] = [...buildHdrToSdrFilters(item)];
   if (level === 'off') {
     const plan = serverSuperResolutionPlan(item, level);
     if (plan.outputWidth && plan.outputHeight) {
@@ -277,8 +278,25 @@ export function buildVideoFilters(
   return { filters, fps };
 }
 
+/**
+ * WebXR browsers do not expose a dependable HDR presentation path. Whenever
+ * Localis has to create an 8-bit compatibility stream, convert HDR on the PC
+ * instead of letting an implicit pixel-format conversion produce grey or
+ * clipped output. Original-file playback remains available as an explicit
+ * device-dependent attempt in the player.
+ */
+export function buildHdrToSdrFilters(item: Pick<MediaItem, 'dynamicRange'>) {
+  if (!isHdrDynamicRange(item.dynamicRange)) return [];
+  return [
+    'zscale=t=linear:npl=100',
+    'format=gbrpf32le',
+    'tonemap=tonemap=hable:desat=0',
+    'zscale=p=bt709:t=bt709:m=bt709:r=tv',
+  ];
+}
+
 export function buildVideoPipeline(
-  item: Pick<MediaItem, 'width' | 'height' | 'sampleAspectRatio' | 'stereo' | 'frameRate'> & { projection?: MediaItem['projection'] },
+  item: Pick<MediaItem, 'width' | 'height' | 'sampleAspectRatio' | 'stereo' | 'frameRate' | 'dynamicRange'> & { projection?: MediaItem['projection'] },
   level: ServerSuperResolutionLevel,
   pixelFormat: 'yuv420p' | 'nv12',
 ): { fps: number; filters?: string[]; filterComplex?: string; outputLabel?: string } {
@@ -290,6 +308,7 @@ export function buildVideoPipeline(
   if (!plan.outputWidth || !plan.outputHeight) return simple;
 
   const profile = SERVER_SUPER_RESOLUTION_PROFILES[level];
+  const hdrToSdr = buildHdrToSdrFilters(item);
   const post = [
     ...(!item.frameRate ? ["fps='min(source_fps,60)'"] : item.frameRate > 60 ? [`fps=${simple.fps}`] : []),
     `format=${pixelFormat}`,
@@ -302,6 +321,7 @@ export function buildVideoPipeline(
     return {
       fps: simple.fps,
       filters: [
+        ...hdrToSdr,
         `v360=input=equirect:output=equirect:in_stereo=${stereo}:out_stereo=${stereo}:w=${width}:h=${height}:interp=${interpolation}`,
         // Never apply a packed-frame spatial filter here. On SBS/TB it would
         // sample across the eye boundary, and on mono it would break the 360°
@@ -321,7 +341,7 @@ export function buildVideoPipeline(
   if (item.stereo === 'sbs') {
     const eyeWidth = Math.max(2, Math.floor(plan.outputWidth / 4) * 2);
     const graph = [
-      '[0:v:0]split=2[sr_left_source][sr_right_source]',
+      `[0:v:0]${hdrToSdr.length ? `${hdrToSdr.join(',')},` : ''}split=2[sr_left_source][sr_right_source]`,
       `[sr_left_source]crop=w=iw/2:h=ih:x=0:y=0,${enhance(eyeWidth, plan.outputHeight)}[sr_left]`,
       `[sr_right_source]crop=w=iw/2:h=ih:x=iw/2:y=0,${enhance(eyeWidth, plan.outputHeight)}[sr_right]`,
       `[sr_left][sr_right]hstack=inputs=2,${post.join(',')}[sr_video]`,
@@ -331,7 +351,7 @@ export function buildVideoPipeline(
 
   const eyeHeight = Math.max(2, Math.floor(plan.outputHeight / 4) * 2);
   const graph = [
-    '[0:v:0]split=2[sr_top_source][sr_bottom_source]',
+    `[0:v:0]${hdrToSdr.length ? `${hdrToSdr.join(',')},` : ''}split=2[sr_top_source][sr_bottom_source]`,
     `[sr_top_source]crop=w=iw:h=ih/2:x=0:y=0,${enhance(plan.outputWidth, eyeHeight)}[sr_top]`,
     `[sr_bottom_source]crop=w=iw:h=ih/2:x=0:y=ih/2,${enhance(plan.outputWidth, eyeHeight)}[sr_bottom]`,
     `[sr_top][sr_bottom]vstack=inputs=2,${post.join(',')}[sr_video]`,

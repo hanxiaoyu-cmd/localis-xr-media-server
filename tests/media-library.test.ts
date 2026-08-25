@@ -47,6 +47,14 @@ describe('media metadata', () => {
     });
     expect(items.find((item) => item.title === 'common-format')).toMatchObject({ kind: 'video', directPlay: false });
     expect(items.find((item) => item.title === 'common-audio')).toMatchObject({ kind: 'audio', audioCodec: 'ac3', directPlay: false });
+    expect(items.find((item) => item.title === 'hdr10-source')).toMatchObject({
+      directPlay: false,
+      dynamicRange: 'hdr10',
+      bitDepth: 10,
+      colorPrimaries: 'bt2020',
+      colorTransfer: 'smpte2084',
+      compatibilityMode: 'tone-map',
+    });
     expect(JSON.stringify(items)).not.toContain(process.cwd());
     expect(JSON.stringify(items)).not.toContain('externalPath');
   });

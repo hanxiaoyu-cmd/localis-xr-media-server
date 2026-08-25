@@ -4,7 +4,9 @@ import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'n
 import path from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { LocalisConfig, MediaItem } from './types';
+import { isHdrDynamicRange } from './media-compatibility';
 import {
+  buildHdrToSdrFilters,
   buildVideoPipeline,
   isAiSuperResolutionLevel,
   serverSuperResolutionPlan,
@@ -20,7 +22,7 @@ export type JobState = 'preparing' | 'running' | 'ready' | 'failed';
 export class SourceChangedError extends Error {}
 export class TranscodeCapacityError extends Error {}
 
-export const TRANSCODE_CACHE_SCHEMA = 'v8-precomputed-ai-sr';
+export const TRANSCODE_CACHE_SCHEMA = 'v9-hdr-safe-compatibility';
 
 export interface TranscodeJob {
   key: string;
@@ -217,6 +219,7 @@ export class TranscodeManager {
 
   decideMode(item: MediaItem, superResolution: ServerSuperResolutionLevel = 'off'): TranscodeMode {
     if (item.kind === 'video' && superResolution !== 'off') return 'transcode';
+    if (item.kind === 'video' && isHdrDynamicRange(item.dynamicRange)) return 'transcode';
     const h264 = item.videoCodec === 'h264'
       && item.pixelFormat === 'yuv420p'
       && (!item.videoProfile || ['Constrained Baseline', 'Baseline', 'Main', 'High'].includes(item.videoProfile))
@@ -546,6 +549,9 @@ export class TranscodeManager {
         if (activePipeline.filters) args.push('-vf', activePipeline.filters.join(','));
         if (job.encoder !== 'h264_mf') args.push('-sc_threshold', '0');
         args.push(...this.encoderArgs(job.encoder, job.superResolution));
+        if (isHdrDynamicRange(item.dynamicRange)) {
+          args.push('-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv');
+        }
       }
     }
 
@@ -584,6 +590,9 @@ export class TranscodeManager {
     if (encoder !== 'h264_mf') args.push('-sc_threshold', '0');
     args.push(
       ...this.encoderArgs(encoder, job.superResolution),
+      ...(isHdrDynamicRange(item.dynamicRange)
+        ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv']
+        : []),
       '-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '192k', '-ar', '48000', '-ac', '2',
       '-af', 'aresample=async=1:first_pts=0',
       '-max_muxing_queue_size', '2048', '-muxdelay', '0', '-muxpreload', '0',
@@ -711,7 +720,7 @@ export class TranscodeManager {
         '-hide_banner', '-nostdin', '-y', '-loglevel', 'warning',
         '-ss', start.toFixed(6), '-i', item.path, '-t', duration.toFixed(6),
         '-an', '-sn', '-dn',
-        '-vf', `fps=${fps},scale=w=${aiInputWidth}:h=${aiInputHeight}:flags=lanczos,tpad=stop_mode=clone:stop_duration=${duration.toFixed(6)},setsar=1`,
+        '-vf', [...buildHdrToSdrFilters(item), `fps=${fps}`, `scale=w=${aiInputWidth}:h=${aiInputHeight}:flags=lanczos`, `tpad=stop_mode=clone:stop_duration=${duration.toFixed(6)}`, 'setsar=1'].join(','),
         '-frames:v', String(expectedFrames), '-start_number', '1',
         path.join(inputDirectory, 'frame_%06d.png'),
       ], 'extracting');
@@ -765,6 +774,9 @@ export class TranscodeManager {
             '-g', String(gop), '-keyint_min', String(gop), '-force_key_frames', 'expr:gte(t,n_forced*2)',
             ...(encoder !== 'h264_mf' ? ['-sc_threshold', '0'] : []),
             ...this.encoderArgs(encoder, 'ai'),
+            ...(isHdrDynamicRange(item.dynamicRange)
+              ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv']
+              : []),
             '-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '192k', '-ar', '48000', '-ac', '2',
             '-af', 'aresample=async=1:first_pts=0',
             '-max_muxing_queue_size', '2048', '-muxdelay', '0', '-muxpreload', '0',

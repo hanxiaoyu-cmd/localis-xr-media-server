@@ -16,7 +16,7 @@
   ![Windows 11](https://img.shields.io/badge/Windows_11-tested-B8FF5C?style=flat-square&labelColor=111311&color=B8FF5C)
   ![Vision Pro](https://img.shields.io/badge/Vision_Pro-zero_install-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
   ![WebXR](https://img.shields.io/badge/WebXR-VR180_%2F_360-B8FF5C?style=flat-square&labelColor=111311&color=B8FF5C)
-  ![Tests](https://img.shields.io/badge/tests-62_passing-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
+  ![Tests](https://img.shields.io/badge/tests-67_passing-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
 </div>
 
 ---
@@ -24,6 +24,8 @@
 ## 不给头显再装一个播放器
 
 Localis 的设计原则只有一句：**所有管理与计算都在电脑上完成，头显只负责访问网页和播放最终视频。**
+
+产品定位固定为：**零安装、私有化、带 AI 增强和网盘接入的 XR 媒体网关。** 新功能应优先增强电脑端媒体兼容与交付能力，不要求头显安装 Localis 客户端，不把私人文件、网盘凭据或 AI 计算迁移到第三方云端。
 
 ```mermaid
 flowchart LR
@@ -57,6 +59,7 @@ flowchart LR
 | --- | --- |
 | 本地媒体 | 递归扫描常见视频与音频；原生文件夹选择窗口；路径不发送到头显 |
 | 兼容播放 | MP4/WebM 等优先 Range 直放；MKV/TS/AVI/旧编码自动 remux 或转 H.264/AAC HLS |
+| HDR 安全播放 | 识别 HDR10、HLG 与杜比视界；兼容流在电脑端显式映射为 SDR BT.709，原文件保持不变并保留设备端尝试入口 |
 | 电脑端超分 | 关闭、标准 1.25×、高 1.5×、极致 2×、AI 清晰 2×；所有计算只在电脑执行 |
 | 长片跳转 | 完整 VOD 时间线立即返回；用户跳到哪里，电脑优先生成哪里的分片并显示缓存进度 |
 | VR / WebXR | 平面、VR180、VR360、Mono、SBS、TB、LR/RL；头显内播放、暂停、跳转与字幕面板 |
@@ -86,6 +89,7 @@ flowchart LR
 | H.264/AAC 位于 MKV/TS 等容器 | fMP4 HLS remux，不重新编码视频 |
 | H.264 + 不兼容音频 | 复制视频，只转 AAC 音频 |
 | MPEG-4 Part 2、VC-1 等不兼容视频 | H.264/AAC HLS |
+| HDR10、HLG、杜比视界 + 兼容流 | 电脑端 Hable 色调映射为 SDR BT.709 H.264；不声称保留 HDR/杜比视界输出 |
 | 任意视频 + 标准/高/极致超分 | 电脑端按需缩放、锐化与 H.264/AAC MPEG-TS VOD HLS |
 | 单目平面/VR180 + AI 清晰 | 电脑端 Real-ESRGAN 完整预处理；全部 4 秒分片完成后一次性开放 H.264/AAC HLS |
 | SRT/VTT/ASS/SSA 文本字幕 | WebVTT |

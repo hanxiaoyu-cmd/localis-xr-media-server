@@ -33,7 +33,7 @@ describe('cloud login UX', () => {
     expect(source).toContain("accountState !== 'authenticated'");
     expect(source).toContain("['ready', 'failed', 'cancelled']");
     expect(source).toContain('没有找到可下载的媒体');
-    expect(source).toContain("if (status === 404 || status === 410) {\n          setQuarkDownload(undefined);");
+    expect(source.replaceAll('\r\n', '\n')).toContain("if (status === 404 || status === 410) {\n          setQuarkDownload(undefined);");
   });
 
   it('keeps management on localhost-only UI while retaining the advanced local bridge', async () => {

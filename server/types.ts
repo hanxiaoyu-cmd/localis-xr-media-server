@@ -3,6 +3,8 @@ export type Projection = 'flat' | 'equirect180' | 'equirect360';
 export type StereoLayout = 'mono' | 'sbs' | 'tb';
 export type EyeOrder = 'lr' | 'rl';
 export type MediaSourceType = 'local' | 'webdav' | 'baidu';
+export type DynamicRange = 'sdr' | 'hdr10' | 'hlg' | 'dolby-vision';
+export type CompatibilityMode = 'direct' | 'remux' | 'audio-transcode' | 'video-transcode' | 'tone-map';
 
 export interface MediaTrack {
   index: number;
@@ -34,6 +36,12 @@ export interface MediaItem {
   videoProfile?: string;
   videoLevel?: number;
   pixelFormat?: string;
+  bitDepth?: number;
+  dynamicRange?: DynamicRange;
+  colorPrimaries?: string;
+  colorTransfer?: string;
+  colorSpace?: string;
+  colorRange?: string;
   sampleAspectRatio?: string;
   audioCodec?: string;
   container?: string;
@@ -44,6 +52,8 @@ export interface MediaItem {
   audioTracks: MediaTrack[];
   subtitleTracks: SubtitleTrack[];
   directPlay: boolean;
+  compatibilityMode: CompatibilityMode;
+  compatibilityReason: string;
   sourceType: MediaSourceType;
   sourceId?: string;
   remoteFileId?: string;

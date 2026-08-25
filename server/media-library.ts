@@ -5,6 +5,7 @@ import { access, lstat, mkdir, readFile, readdir, stat, writeFile } from 'node:f
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { CloudRemoteFile, CloudSourceManager } from './cloud-source-manager';
+import { analyzeMediaCompatibility } from './media-compatibility';
 import type {
   EyeOrder,
   LocalisConfig,
@@ -34,6 +35,13 @@ interface ProbeStream {
   profile?: string;
   level?: number;
   pix_fmt?: string;
+  bits_per_raw_sample?: string;
+  bits_per_sample?: number;
+  color_range?: string;
+  color_space?: string;
+  color_transfer?: string;
+  color_primaries?: string;
+  side_data_list?: Array<{ side_data_type?: string }>;
   sample_aspect_ratio?: string;
   width?: number;
   height?: number;
@@ -187,6 +195,8 @@ export class MediaLibrary {
       audioTracks: [],
       subtitleTracks: [],
       directPlay: kind === 'video' ? directVideoExtensions.has(extension) : directAudioExtensions.has(extension),
+      compatibilityMode: kind === 'video' && directVideoExtensions.has(extension) ? 'direct' : kind === 'audio' && directAudioExtensions.has(extension) ? 'direct' : kind === 'audio' ? 'audio-transcode' : 'video-transcode',
+      compatibilityReason: '云盘文件将在首次播放并缓存到电脑后完成编码与 HDR 检测。',
       sourceType: file.provider === 'baidu' ? 'baidu' : 'webdav',
       sourceId: file.sourceId,
       remoteFileId: file.id,
@@ -236,15 +246,7 @@ export class MediaLibrary {
         source: 'embedded',
       }));
     const kind: MediaKind = video ? 'video' : 'audio';
-    const browserSafeH264 = video?.codec_name === 'h264'
-      && video.pix_fmt === 'yuv420p'
-      && (!video.profile || ['Constrained Baseline', 'Baseline', 'Main', 'High'].includes(video.profile))
-      && (!video.level || video.level <= 52);
-    const directPlay = kind === 'video'
-      ? directVideoExtensions.has(extension)
-        && browserSafeH264
-        && (!audio || audio.codec_name === 'aac' || audio.codec_name === 'mp3')
-      : directAudioExtensions.has(extension);
+    const compatibility = analyzeMediaCompatibility({ kind, fileName: filePath, video, audio });
     const title = override.title || path.basename(filePath, extension).replace(/[._]+/g, ' ');
 
     return {
@@ -264,6 +266,12 @@ export class MediaLibrary {
       videoProfile: video?.profile,
       videoLevel: video?.level,
       pixelFormat: video?.pix_fmt,
+      bitDepth: compatibility.bitDepth,
+      dynamicRange: compatibility.dynamicRange,
+      colorPrimaries: compatibility.colorPrimaries,
+      colorTransfer: compatibility.colorTransfer,
+      colorSpace: compatibility.colorSpace,
+      colorRange: compatibility.colorRange,
       sampleAspectRatio: video?.sample_aspect_ratio,
       audioCodec: audio?.codec_name,
       container: probe.format?.format_name,
@@ -279,7 +287,9 @@ export class MediaLibrary {
         channels: stream.channels,
       })),
       subtitleTracks: [...embeddedTracks, ...externalTracks],
-      directPlay,
+      directPlay: compatibility.directPlay,
+      compatibilityMode: compatibility.compatibilityMode,
+      compatibilityReason: compatibility.compatibilityReason,
       sourceType: 'local',
       path: filePath,
       libraryRoot,

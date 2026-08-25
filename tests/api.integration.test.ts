@@ -186,6 +186,34 @@ describe('Localis API', () => {
     ]));
   });
 
+  it('detects HDR10 and tone-maps the compatibility stream to tagged SDR BT.709', async () => {
+    const listed = deps.library.list().find((candidate) => candidate.title === 'hdr10-source')!;
+    const item = deps.library.get(listed.id)!;
+    expect(item).toMatchObject({ dynamicRange: 'hdr10', directPlay: false, compatibilityMode: 'tone-map' });
+    expect(deps.transcodes.decideMode(item, 'off')).toBe('transcode');
+
+    await host(request(api).get(`/api/media/${item.id}/hls/off/index.m3u8`)).expect(200);
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      if (deps.transcodes.statusForItem(item, 'off').state === 'ready') break;
+      await wait(100);
+    }
+    expect(deps.transcodes.statusForItem(item, 'off')).toMatchObject({ state: 'ready', mode: 'transcode' });
+    const job = deps.transcodes.jobForItem(item, 'off')!;
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=codec_name,pix_fmt,color_primaries,color_transfer,color_space,color_range',
+      '-of', 'json', job.playlistPath,
+    ], { windowsHide: true });
+    expect((JSON.parse(stdout) as { streams: Array<Record<string, string>> }).streams[0]).toMatchObject({
+      codec_name: 'h264',
+      pix_fmt: 'yuv420p',
+      color_primaries: 'bt709',
+      color_transfer: 'bt709',
+      color_space: 'bt709',
+      color_range: 'tv',
+    });
+  });
+
   it('forces a direct-playable video through the computer-side Standard profile at the planned dimensions', async () => {
     const listed = deps.library.list().find((candidate) => candidate.title === 'flat-demo')!;
     const item = deps.library.get(listed.id)!;
@@ -240,7 +268,10 @@ describe('Localis API', () => {
     await host(request(api).get(`/api/media/${item.id}/hls/ai/seg_000000.ts`)).expect(404);
 
     let playlist: request.Response | undefined;
-    for (let attempt = 0; attempt < 24; attempt += 1) {
+    // Real-ESRGAN startup time varies substantially across Windows GPUs and
+    // shared CI runners. Preserve the behavior assertion without treating a
+    // healthy 6-20 second precompute as a failure.
+    for (let attempt = 0; attempt < 80; attempt += 1) {
       const response = await host(request(api).get(`/api/media/${item.id}/hls/ai/index.m3u8`));
       if (response.status === 200) {
         playlist = response;

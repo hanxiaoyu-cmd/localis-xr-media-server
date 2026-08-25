@@ -26,7 +26,8 @@ describe('subtitle conversion', () => {
         id: 'subtitle-version-item', kind: 'video', title: 'movie', fileName: 'movie.mkv', relativePath: 'movie.mkv',
         extension: '.mkv', size: 1, modifiedAt: new Date().toISOString(), duration: 2,
         projection: 'flat', stereo: 'mono', eyeOrder: 'lr', yawOffset: 0,
-        audioTracks: [], subtitleTracks: [], directPlay: false, sourceType: 'local', path: subtitlePath, libraryRoot: dataDir,
+        audioTracks: [], subtitleTracks: [], directPlay: false, compatibilityMode: 'video-transcode',
+        compatibilityReason: '测试媒体', sourceType: 'local', path: subtitlePath, libraryRoot: dataDir,
       } satisfies MediaItem;
       const track = { index: 1000, codec: 'ass', source: 'external', externalPath: subtitlePath } satisfies SubtitleTrack;
       expect(await getSubtitleVtt(config, item, track)).toContain('OLD-CAPTION');

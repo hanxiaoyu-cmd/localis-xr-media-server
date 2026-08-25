@@ -86,6 +86,14 @@ function enhancedReadyStatus(level: ServerSuperResolutionLevel) {
     : `电脑端${superResolutionLabel(level)}超分 · 可拖动`;
 }
 
+function dynamicRangeLabel(item: Pick<PublicMediaItem, 'dynamicRange' | 'bitDepth'>) {
+  const range = item.dynamicRange === 'dolby-vision' ? '杜比视界'
+    : item.dynamicRange === 'hdr10' ? 'HDR10'
+      : item.dynamicRange === 'hlg' ? 'HLG'
+        : 'SDR';
+  return item.bitDepth ? `${range} · ${item.bitDepth}-bit` : range;
+}
+
 export function MediaPlayer({ mediaId }: { mediaId: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<XrVideoStage | undefined>(undefined);
@@ -602,6 +610,16 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
 
       {error && <div className="inline-error player-inline-error" role="alert">{error}<button onClick={() => setError('')}>关闭</button></div>}
 
+      {item.kind === 'video' && !item.directPlay && (
+        <section className={`compatibility-notice ${item.compatibilityMode === 'tone-map' ? 'hdr-notice' : ''}`} aria-label="媒体兼容性说明">
+          <div><span>{item.compatibilityMode === 'tone-map' ? 'HDR 安全播放' : '电脑端兼容'}</span><strong>{dynamicRangeLabel(item)}</strong></div>
+          <p>{item.compatibilityReason}</p>
+          <small>{item.compatibilityMode === 'tone-map'
+            ? '“兼容流”输出标准 SDR；“尝试原始 HDR”不会改动文件，但是否呈现 HDR 由当前头显浏览器决定。'
+            : '原文件不会被修改，转换结果只保存在电脑端私有缓存。'}</small>
+        </section>
+      )}
+
       <section className="player-controls-panel">
         <div className="projection-controls">
           <label>投影<select value={item.projection} onChange={(event) => void updateMedia({ projection: event.target.value as PublicMediaItem['projection'] })}><option value="flat">平面</option><option value="equirect180">VR180</option><option value="equirect360">VR360</option></select></label>
@@ -610,7 +628,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
           <label>电脑端超分<select aria-label="电脑端超分" value={superResolution} disabled={item.kind !== 'video'} onChange={(event) => changeSuperResolution(event.target.value as ServerSuperResolutionLevel)}><option value="off">关闭（可直连时为原片）</option><option value="standard">标准 · 最多 1.25×</option><option value="high">高 · 最多 1.5×</option><option value="ultra">极致 · 最多 2×</option><option value="ai">AI 清晰 · 完整预处理后播放</option></select></label>
           <label className="yaw-control">朝向<input aria-label="水平朝向" type="range" min="-3.15" max="3.15" step="0.05" value={item.yawOffset} onChange={(event) => void updateMedia({ yawOffset: Number(event.target.value) })} /></label>
           <button className="mode-button" onClick={() => void updateMedia({ yawOffset: 0 })}>重新居中</button>
-          <button className="mode-button" disabled={superResolution !== 'off'} onClick={() => { directFailed.current = transport === 'direct'; setTransport(transport === 'direct' ? 'hls' : 'direct'); }}>{superResolution !== 'off' ? '超分由电脑流式输出' : transport === 'direct' ? '使用兼容流' : '尝试原文件'}</button>
+          <button className="mode-button" disabled={superResolution !== 'off'} onClick={() => { directFailed.current = transport === 'direct'; setTransport(transport === 'direct' ? 'hls' : 'direct'); }}>{superResolution !== 'off' ? '超分由电脑流式输出' : transport === 'direct' ? '使用兼容流' : item.compatibilityMode === 'tone-map' ? '尝试原始 HDR' : '尝试原文件'}</button>
           <button className="mode-button" onClick={exportDiagnostics}>导出诊断</button>
         </div>
         <button className="xr-button" disabled={!xrSupported || enteringXr || item.kind !== 'video'} onClick={() => void enterXr()}>{enteringXr ? '正在进入…' : xrSupported ? '进入沉浸模式' : '此环境不可用 WebXR'}</button>
@@ -622,6 +640,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
         <div><span>时长</span><strong>{clock(item.duration)}</strong></div>
         <div><span>源画面</span><strong>{item.width ? `${item.width}×${item.height} · ${item.frameRate || '—'} fps` : item.kind === 'audio' ? '仅音频' : '播放后检测'}</strong></div>
         <div><span>编码</span><strong>{[item.videoCodec, item.audioCodec].filter(Boolean).join(' / ') || '云端文件待检测'}</strong></div>
+        <div><span>色彩</span><strong>{item.kind === 'video' ? dynamicRangeLabel(item) : '—'}</strong></div>
         <div><span>XR 安全环境</span><strong>{diagnostics?.secureContext ? '是' : '否'}</strong></div>
         <div><span>设备端超分</span><strong>已禁用</strong></div>
         <div><span>丢帧</span><strong>{diagnostics?.droppedFrames ?? '播放后检测'}{diagnostics?.totalFrames ? ` / ${diagnostics.totalFrames}` : ''}</strong></div>

@@ -7,6 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import QRCode from 'qrcode';
+import { analyzeMediaCompatibility } from './media-compatibility';
 import type { LocalisConfig, MediaItem } from './types';
 
 const execFileAsync = promisify(execFile);
@@ -1403,6 +1404,8 @@ export class CloudSourceManager {
         streams?: Array<{
           codec_type?: string; codec_name?: string; profile?: string; level?: number; pix_fmt?: string;
           sample_aspect_ratio?: string; width?: number; height?: number; avg_frame_rate?: string;
+          bits_per_raw_sample?: string; bits_per_sample?: number; color_range?: string; color_space?: string;
+          color_transfer?: string; color_primaries?: string; side_data_list?: Array<{ side_data_type?: string }>;
         }>;
       };
       const video = probe.streams?.find((stream) => stream.codec_type === 'video');
@@ -1411,6 +1414,12 @@ export class CloudSourceManager {
       const frameRate = Number.isFinite(numerator) && Number.isFinite(denominator) && denominator > 0
         ? Math.round(numerator / denominator * 1000) / 1000
         : undefined;
+      const compatibility = analyzeMediaCompatibility({
+        kind: video ? 'video' : 'audio',
+        fileName: filePath,
+        video,
+        audio,
+      });
       return {
         duration: Number(probe.format?.duration || 0),
         width: video?.width,
@@ -1420,9 +1429,18 @@ export class CloudSourceManager {
         videoProfile: video?.profile,
         videoLevel: video?.level,
         pixelFormat: video?.pix_fmt,
+        bitDepth: compatibility.bitDepth,
+        dynamicRange: compatibility.dynamicRange,
+        colorPrimaries: compatibility.colorPrimaries,
+        colorTransfer: compatibility.colorTransfer,
+        colorSpace: compatibility.colorSpace,
+        colorRange: compatibility.colorRange,
         sampleAspectRatio: video?.sample_aspect_ratio,
         audioCodec: audio?.codec_name,
         container: probe.format?.format_name,
+        directPlay: compatibility.directPlay,
+        compatibilityMode: compatibility.compatibilityMode,
+        compatibilityReason: compatibility.compatibilityReason,
       };
     })();
     this.localizedMetadata.set(filePath, operation);
