@@ -98,6 +98,32 @@ export interface LocalisConfig {
   baiduAppFolder?: string;
 }
 
+export type FolderBrowserLocationKind =
+  | 'drive'
+  | 'home'
+  | 'desktop'
+  | 'documents'
+  | 'downloads'
+  | 'media';
+
+export interface FolderBrowserEntry {
+  name: string;
+  path: string;
+}
+
+export interface FolderBrowserLocation extends FolderBrowserEntry {
+  kind?: FolderBrowserLocationKind;
+}
+
+export interface FolderBrowserResult {
+  currentPath: string;
+  parentPath?: string;
+  folders: FolderBrowserEntry[];
+  locations: FolderBrowserLocation[];
+  alreadyAdded: boolean;
+  truncated?: boolean;
+}
+
 export interface PlaybackProgress {
   mediaId: string;
   position: number;

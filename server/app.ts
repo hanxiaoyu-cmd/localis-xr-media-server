@@ -7,6 +7,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { getLanAddresses, saveMediaDirs } from './config';
 import { PairingAuth } from './auth';
 import { FolderPickerBusyError, FolderPickerUnsupportedError, isLoopbackAddress, pickLocalDirectory } from './folder-picker';
+import { FolderBrowser, FolderBrowserError } from './folder-browser';
 import { MediaDirectoryValidationError, MediaLibrary } from './media-library';
 import { ProgressStore } from './progress-store';
 import { parseByteRange, RangeNotSatisfiableError } from './range';
@@ -27,6 +28,8 @@ export interface AppDependencies {
   clouds?: CloudSourceManager;
   quark?: QuarkDesktopConnector;
   pickDirectory?: () => Promise<string | undefined>;
+  folderBrowser?: FolderBrowser;
+  isFolderBrowserLoopback?: (remoteAddress: string | undefined) => boolean;
   buildMetadata?: BuildMetadataReadResult | Promise<BuildMetadataReadResult>;
 }
 
@@ -111,6 +114,8 @@ export function createApiApp(deps: AppDependencies) {
   const { config, library, auth, progress, transcodes, clouds, quark } = deps;
   const buildMetadata = Promise.resolve(deps.buildMetadata ?? getBuildMetadata());
   const selectDirectory = deps.pickDirectory ?? (() => pickLocalDirectory(config.mediaDirs[0]));
+  const folderBrowser = deps.folderBrowser ?? new FolderBrowser(config);
+  const isFolderBrowserLoopback = deps.isFolderBrowserLoopback ?? isLoopbackAddress;
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', false);
@@ -222,6 +227,16 @@ export function createApiApp(deps: AppDependencies) {
       await saveMediaDirs(config, [...config.mediaDirs, directory]);
       await library.scan();
       res.status(201).json({ mediaDirs: config.mediaDirs.map((entry) => path.basename(entry)), items: library.list() });
+    } catch (error) { next(error); }
+  });
+  app.get('/api/library/folders/browse', async (req, res, next) => {
+    try {
+      res.set('Cache-Control', 'no-store');
+      if (!isFolderBrowserLoopback(req.socket.remoteAddress)) {
+        return res.status(403).json({ error: 'local_management_required', message: '请在运行 Localis 的电脑上浏览文件夹。' });
+      }
+      const result = await folderBrowser.browse(req.query.path);
+      res.json(result);
     } catch (error) { next(error); }
   });
   app.post('/api/library/folders/pick', async (req, res, next) => {
@@ -635,6 +650,9 @@ export function createApiApp(deps: AppDependencies) {
     }
     if (error instanceof FolderPickerUnsupportedError) {
       return res.status(501).json({ error: 'folder_picker_unsupported', message: error.message });
+    }
+    if (error instanceof FolderBrowserError) {
+      return res.status(error.status).json({ error: error.code, message: error.message });
     }
     if (error instanceof MediaDirectoryValidationError) {
       return res.status(400).json({ error: 'invalid_media_directory', message: error.message });
