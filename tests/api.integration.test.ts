@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApiApp, type AppDependencies } from '../server/app';
+import { createBuildMetadata } from '../server/build-metadata';
 import { PairingAuth } from '../server/auth';
 import { MediaLibrary } from '../server/media-library';
 import { FolderPickerBusyError } from '../server/folder-picker';
@@ -27,6 +28,34 @@ let mutableSourcePath = '';
 
 const host = (test: request.Test) => test.set('Host', 'localhost');
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const configuredFfmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+const configuredFfprobePath = process.env.FFPROBE_PATH || 'ffprobe';
+const outputProbePath = process.env.LOCALIS_OUTPUT_PROBE_PATH || 'ffprobe';
+
+async function execOutputProbe(arguments_: string[], _options?: { windowsHide?: boolean }) {
+  const probeArguments = [...arguments_];
+  const target = probeArguments.at(-1);
+  if (target?.endsWith('.m3u8')) {
+    const directory = path.dirname(target);
+    const playlist = await readFile(target, 'utf8');
+    const initName = playlist.match(/^#EXT-X-MAP:.*URI="([^"]+)"/m)?.[1];
+    const segmentName = playlist.split(/\r?\n/).map((line) => line.trim())
+      .find((line) => /^seg_\d{6}\.m4s$/.test(line));
+    if (initName === 'init.mp4' && segmentName) {
+      // ffprobe-static 4.x cannot resolve relative fMP4 HLS assets on Windows.
+      // Concatenating the standard init fragment and first media fragment
+      // validates the packaged probe and encoded streams without using a
+      // different machine-wide ffprobe than the application ships.
+      const combinedPath = path.join(directory, '.localis-output-probe.mp4');
+      await writeFile(combinedPath, Buffer.concat(await Promise.all([
+        readFile(path.join(directory, initName)),
+        readFile(path.join(directory, segmentName)),
+      ])));
+      probeArguments[probeArguments.length - 1] = combinedPath;
+    }
+  }
+  return execFileAsync(outputProbePath, probeArguments, { windowsHide: true, encoding: 'utf8' });
+}
 
 beforeAll(async () => {
   tempDir = await mkdtemp(path.join(os.tmpdir(), 'localis-api-'));
@@ -38,7 +67,7 @@ beforeAll(async () => {
     projectRoot: process.cwd(), dataDir: tempDir, cacheDir: path.join(tempDir, 'cache'),
     mediaDirs: [path.join(process.cwd(), 'sample-media'), mutableMediaDir], port: 0, host: '127.0.0.1',
     authDisabled: true, pairingCode: '123456', allowedHosts: ['localhost', '127.0.0.1'],
-    ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', maxTranscodes: 2,
+    ffmpegPath: configuredFfmpegPath, ffprobePath: configuredFfprobePath, maxTranscodes: 2,
     aiSuperResolutionPath: process.platform === 'win32'
       ? path.join(process.cwd(), 'desktop', 'vendor', 'realesrgan', 'realesrgan-ncnn-vulkan.exe')
       : undefined,
@@ -62,6 +91,31 @@ afterAll(async () => {
 });
 
 describe('Localis API', () => {
+  it('publishes one verified build identity through health, server and player diagnostics data', async () => {
+    const metadata = createBuildMetadata({
+      version: '0.3.0',
+      commitSha: '0123456789abcdef0123456789abcdef01234567',
+      buildTime: '2026-08-26T01:02:03.000Z',
+      dirty: false,
+      channel: 'test',
+    });
+    const buildMetadata = {
+      available: true,
+      status: 'available',
+      metadata,
+    } as const;
+    const identifiedApi = createApiApp({ ...deps, buildMetadata });
+    const item = deps.library.list()[0];
+
+    const health = await host(request(identifiedApi).get('/api/health')).expect(200);
+    const server = await host(request(identifiedApi).get('/api/server')).expect(200);
+    const media = await host(request(identifiedApi).get(`/api/media/${item.id}`)).expect(200);
+
+    expect(health.body.build).toEqual(buildMetadata);
+    expect(server.body.build).toEqual(buildMetadata);
+    expect(media.body.build).toEqual(buildMetadata);
+  });
+
   it('exposes the ephemeral pairing code only to the computer loopback status endpoint', async () => {
     const response = await host(request(api).get('/api/pair/status')).expect(200);
     expect(response.body).toMatchObject({ paired: true, pairingRequired: false });
@@ -176,14 +230,93 @@ describe('Localis API', () => {
     const playlistResponse = await host(request(api).get(`/api/media/${item.id}/hls/index.m3u8`)).expect(200);
     expect(playlistResponse.text).toContain('#EXT-X-MAP');
     expect(playlistResponse.text).toContain('#EXT-X-ENDLIST');
+    const firstSegment = playlistResponse.text.split(/\r?\n/).map((line) => line.trim())
+      .find((line) => /^seg_\d{6}\.m4s$/.test(line));
+    expect(firstSegment).toBeTruthy();
+    await host(request(api).get(`/api/media/${item.id}/hls/${firstSegment}`)).expect(200);
 
     const job = [...deps.transcodes.jobs.values()].find((candidate) => candidate.itemId === item.id)!;
-    const { stdout } = await execFileAsync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,codec_type,pix_fmt', '-of', 'json', job.playlistPath], { windowsHide: true });
+    const { stdout } = await execOutputProbe(['-v', 'error', '-show_entries', 'stream=codec_name,codec_type,pix_fmt', '-of', 'json', job.playlistPath], { windowsHide: true });
     const probe = JSON.parse(stdout) as { streams: Array<{ codec_name: string; codec_type: string; pix_fmt?: string }> };
     expect(probe.streams).toEqual(expect.arrayContaining([
       expect.objectContaining({ codec_name: 'h264', codec_type: 'video', pix_fmt: 'yuv420p' }),
       expect.objectContaining({ codec_name: 'aac', codec_type: 'audio' }),
     ]));
+  });
+
+  it('keeps adaptive off remuxing but forces the client-safety route through H.264/AAC', async () => {
+    const listed = deps.library.list().find((candidate) => candidate.title === 'flat-remux')!;
+    const item = deps.library.get(listed.id)!;
+    expect(deps.transcodes.decideMode(item, 'off')).toBe('remux');
+    expect(deps.transcodes.decideMode(item, 'off', true)).toBe('transcode');
+
+    const pending = await host(request(api).get(`/api/media/${item.id}/hls/compat/status`)).expect(200);
+    expect(pending.body).toMatchObject({ state: 'idle', mode: 'transcode', forcedCompatibility: true });
+
+    const playlist = await host(request(api).get(`/api/media/${item.id}/hls/compat/index.m3u8`)).expect(200);
+    expect(playlist.text).toContain('#EXTM3U');
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      if (deps.transcodes.statusForItem(item, 'off', true).state === 'ready') break;
+      await wait(100);
+    }
+
+    const status = deps.transcodes.statusForItem(item, 'off', true);
+    expect(status).toMatchObject({ state: 'ready', mode: 'transcode', forcedCompatibility: true });
+    const forcedJob = deps.transcodes.jobForItem(item, 'off', true)!;
+    expect(forcedJob).toBeTruthy();
+    expect(deps.transcodes.jobForItem(item, 'off')).toBeUndefined();
+    await host(request(api).get(`/api/media/${item.id}/hls/compat/init.mp4`)).expect(200);
+
+    const { stdout } = await execOutputProbe([
+      '-v', 'error',
+      '-show_entries', 'stream=codec_name,codec_type,pix_fmt,width,height,avg_frame_rate',
+      '-of', 'json', forcedJob.playlistPath,
+    ], { windowsHide: true });
+    const streams = (JSON.parse(stdout) as {
+      streams: Array<{
+        codec_name: string;
+        codec_type: string;
+        pix_fmt?: string;
+        width?: number;
+        height?: number;
+        avg_frame_rate?: string;
+      }>;
+    }).streams;
+    const video = streams.find((stream) => stream.codec_type === 'video')!;
+    const audio = streams.find((stream) => stream.codec_type === 'audio')!;
+    const [fpsNumerator, fpsDenominator] = (video.avg_frame_rate || '0/1').split('/').map(Number);
+    expect(video).toMatchObject({ codec_name: 'h264', pix_fmt: 'yuv420p' });
+    expect(Math.max(video.width || 0, video.height || 0)).toBeLessThanOrEqual(4096);
+    expect(fpsNumerator / fpsDenominator).toBeLessThanOrEqual(60);
+    expect(audio.codec_name).toBe('aac');
+  });
+
+  it('detects HDR10 and tone-maps the compatibility stream to tagged SDR BT.709', async () => {
+    const listed = deps.library.list().find((candidate) => candidate.title === 'hdr10-source')!;
+    const item = deps.library.get(listed.id)!;
+    expect(item).toMatchObject({ dynamicRange: 'hdr10', directPlay: false, compatibilityMode: 'tone-map' });
+    expect(deps.transcodes.decideMode(item, 'off')).toBe('transcode');
+
+    await host(request(api).get(`/api/media/${item.id}/hls/off/index.m3u8`)).expect(200);
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      if (deps.transcodes.statusForItem(item, 'off').state === 'ready') break;
+      await wait(100);
+    }
+    expect(deps.transcodes.statusForItem(item, 'off')).toMatchObject({ state: 'ready', mode: 'transcode' });
+    const job = deps.transcodes.jobForItem(item, 'off')!;
+    const { stdout } = await execOutputProbe([
+      '-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=codec_name,pix_fmt,color_primaries,color_transfer,color_space,color_range',
+      '-of', 'json', job.playlistPath,
+    ], { windowsHide: true });
+    expect((JSON.parse(stdout) as { streams: Array<Record<string, string>> }).streams[0]).toMatchObject({
+      codec_name: 'h264',
+      pix_fmt: 'yuv420p',
+      color_primaries: 'bt709',
+      color_transfer: 'bt709',
+      color_space: 'bt709',
+      color_range: 'tv',
+    });
   });
 
   it('forces a direct-playable video through the computer-side Standard profile at the planned dimensions', async () => {
@@ -202,7 +335,7 @@ describe('Localis API', () => {
       plan: { outputWidth: plan.outputWidth, outputHeight: plan.outputHeight },
     });
     const job = deps.transcodes.jobForItem(item, 'standard')!;
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,codec_name,pix_fmt,level', '-of', 'json', path.join(job.directory, 'seg_000000.ts'),
     ], { windowsHide: true });
     const encoded = (JSON.parse(stdout) as { streams: Array<{ width: number; height: number; codec_name: string; pix_fmt: string; level: number }> }).streams[0];
@@ -217,14 +350,17 @@ describe('Localis API', () => {
     await host(request(api).get(`/api/media/${spherical.id}/hls/high/seg_000000.ts`)).expect(200);
     const sphericalJob = deps.transcodes.jobForItem(spherical, 'high')!;
     expect(sphericalJob.state).toBe('ready');
-    const sphericalProbe = await execFileAsync('ffprobe', [
+    const sphericalProbe = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', path.join(sphericalJob.directory, 'seg_000000.ts'),
     ], { windowsHide: true });
     expect((JSON.parse(sphericalProbe.stdout) as { streams: Array<{ width: number; height: number }> }).streams[0])
       .toMatchObject({ width: sphericalPlan.outputWidth, height: sphericalPlan.outputHeight });
   });
 
-  it.runIf(process.platform === 'win32')('precomputes every AI segment before publishing a playable HLS manifest', async () => {
+  // Hosted Windows runners do not expose the Vulkan GPU required by the real
+  // NCNN executable. Local/release-device validation keeps this enabled unless
+  // CI explicitly disables only this hardware-bound case.
+  it.runIf(process.platform === 'win32' && process.env.LOCALIS_RUN_AI_INTEGRATION !== '0')('precomputes every AI segment before publishing a playable HLS manifest', async () => {
     const health = await host(request(api).get('/api/health')).expect(200);
     expect(health.body.aiSuperResolution).toMatchObject({
       available: true,
@@ -240,7 +376,10 @@ describe('Localis API', () => {
     await host(request(api).get(`/api/media/${item.id}/hls/ai/seg_000000.ts`)).expect(404);
 
     let playlist: request.Response | undefined;
-    for (let attempt = 0; attempt < 24; attempt += 1) {
+    // Real-ESRGAN startup time varies substantially across Windows GPUs and
+    // shared CI runners. Preserve the behavior assertion without treating a
+    // healthy 6-20 second precompute as a failure.
+    for (let attempt = 0; attempt < 80; attempt += 1) {
       const response = await host(request(api).get(`/api/media/${item.id}/hls/ai/index.m3u8`));
       if (response.status === 200) {
         playlist = response;
@@ -267,7 +406,7 @@ describe('Localis API', () => {
       plan: { outputWidth: plan.outputWidth, outputHeight: plan.outputHeight },
     });
     const job = deps.transcodes.jobForItem(item, 'ai')!;
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await execOutputProbe([
       '-v', 'error', '-show_entries', 'stream=codec_name,width,height,pix_fmt:format=duration',
       '-of', 'json', path.join(job.directory, 'seg_000000.ts'),
     ], { windowsHide: true });
@@ -307,7 +446,7 @@ describe('Localis API', () => {
     const job = deps.transcodes.jobForItem(item, 'standard')!;
     expect(await access(path.join(job.directory, 'seg_000002.ts')).then(() => true)).toBe(true);
     await expect(access(path.join(job.directory, 'seg_000000.ts'))).rejects.toBeTruthy();
-    const probe = await execFileAsync('ffprobe', [
+    const probe = await execOutputProbe([
       '-v', 'error', '-show_entries', 'format=start_time,duration', '-of', 'json', path.join(job.directory, 'seg_000002.ts'),
     ], { windowsHide: true });
     const format = (JSON.parse(probe.stdout) as { format: { start_time: string; duration: string } }).format;
@@ -347,7 +486,7 @@ describe('Localis API', () => {
     }
     const job = deps.transcodes.jobForItem(deps.library.get(item.id)!)!;
     expect(job.state).toBe('ready');
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', job.playlistPath,
     ], { windowsHide: true });
     const stream = (JSON.parse(stdout) as { streams: Array<{ width: number; height: number }> }).streams[0];
@@ -357,6 +496,12 @@ describe('Localis API', () => {
 
   it('transcodes H.264 High10 instead of remuxing the same incompatible pixel format', async () => {
     const item = deps.library.list().find((candidate) => candidate.title === 'high10-incompatible')!;
+    expect(item).toMatchObject({
+      bitDepth: 10,
+      dynamicRange: 'unknown',
+      compatibilityMode: 'video-transcode',
+    });
+    expect(item.compatibilityReason).toMatch(/无法可靠判定 HDR\/SDR/);
     expect(deps.transcodes.decideMode(deps.library.get(item.id)!)).toBe('transcode');
     await host(request(api).get(`/api/media/${item.id}/hls/index.m3u8`)).expect(200);
     for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -365,7 +510,7 @@ describe('Localis API', () => {
     }
     const job = deps.transcodes.jobForItem(deps.library.get(item.id)!)!;
     expect(job.state).toBe('ready');
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,pix_fmt', '-of', 'json', job.playlistPath,
     ], { windowsHide: true });
     expect((JSON.parse(stdout) as { streams: Array<{ codec_name: string; pix_fmt: string }> }).streams[0])
@@ -380,7 +525,7 @@ describe('Localis API', () => {
       await wait(100);
     }
     const anamorphicJob = deps.transcodes.jobForItem(deps.library.get(anamorphic.id)!)!;
-    const anamorphicProbe = await execFileAsync('ffprobe', [
+    const anamorphicProbe = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,sample_aspect_ratio', '-of', 'json', anamorphicJob.playlistPath,
     ], { windowsHide: true });
     const display = (JSON.parse(anamorphicProbe.stdout) as { streams: Array<{ width: number; height: number; sample_aspect_ratio: string }> }).streams[0];
@@ -396,7 +541,7 @@ describe('Localis API', () => {
       await wait(100);
     }
     const highFpsJob = deps.transcodes.jobForItem(deps.library.get(highFps.id)!)!;
-    const fpsProbe = await execFileAsync('ffprobe', [
+    const fpsProbe = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=avg_frame_rate', '-of', 'json', highFpsJob.playlistPath,
     ], { windowsHide: true });
     const [numerator, denominator] = (JSON.parse(fpsProbe.stdout) as { streams: Array<{ avg_frame_rate: string }> }).streams[0].avg_frame_rate.split('/').map(Number);
@@ -418,10 +563,18 @@ describe('Localis API', () => {
       const mode = transcodes.decideMode(item);
       expect(mode).toBe('remux');
 
-      const keyFor = (schema: string) => createHash('sha256')
+      const keyFor = (schema: string, includeIntent = false) => createHash('sha256')
         .update([
-          schema, item.id, item.size, item.modifiedAt, mode, 'off', item.projection,
-          item.stereo, item.sampleAspectRatio || '1:1', 'copy',
+          schema, item.id, item.size, item.modifiedAt, mode, 'off',
+          ...(includeIntent ? ['adaptive'] : []), item.projection,
+          item.stereo, item.sampleAspectRatio || '1:1',
+          item.dynamicRange ?? 'missing-dynamic-range',
+          item.bitDepth ?? 'missing-bit-depth',
+          item.colorPrimaries ?? 'missing-color-primaries',
+          item.colorTransfer ?? 'missing-color-transfer',
+          item.colorSpace ?? 'missing-color-space',
+          item.colorRange ?? 'missing-color-range',
+          'copy',
         ].join('|'))
         .digest('hex')
         .slice(0, 32);
@@ -444,10 +597,21 @@ describe('Localis API', () => {
       ]);
 
       const job = await transcodes.ensure(item);
-      expect(job.key).toBe(keyFor(TRANSCODE_CACHE_SCHEMA));
+      expect(job.key).toBe(keyFor(TRANSCODE_CACHE_SCHEMA, true));
       expect(job.key).not.toBe(legacyKey);
       expect(job.directory).not.toBe(legacyDirectory);
       expect(await readFile(path.join(legacyDirectory, 'index.m3u8'), 'utf8')).toContain('legacy-v3-cache');
+
+      for (const signalPatch of [
+        { dynamicRange: 'sdr10' as const },
+        { bitDepth: (item.bitDepth || 8) + 2 },
+        { colorPrimaries: 'bt2020' },
+        { colorTransfer: 'smpte2084' },
+        { colorSpace: 'bt2020nc' },
+        { colorRange: item.colorRange === 'pc' ? 'tv' : 'pc' },
+      ]) {
+        expect(transcodes.jobForItem({ ...item, ...signalPatch })).toBeUndefined();
+      }
     } finally {
       transcodes.shutdown();
       await wait(100);

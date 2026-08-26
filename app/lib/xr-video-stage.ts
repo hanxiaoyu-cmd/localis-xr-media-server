@@ -11,6 +11,11 @@ export interface XrVideoOptions {
 export interface XrDiagnostics {
   secureContext: boolean;
   webXrAvailable: boolean;
+  xrSessionActive: boolean;
+  graphicsApi: 'webgl' | 'webgl2';
+  videoTextureColorSpace: 'srgb';
+  /** WebGL/WebXR does not expose proof of an HDR presentation signal. */
+  hdrPresentationVerified: false;
   maxTextureSize: number;
   videoWidth: number;
   videoHeight: number;
@@ -384,10 +389,17 @@ export class XrVideoStage {
 
   diagnostics(): XrDiagnostics {
     const quality = this.video.getVideoPlaybackQuality?.();
+    const context = this.renderer.getContext();
     return {
       secureContext: window.isSecureContext,
       webXrAvailable: Boolean(navigator.xr),
-      maxTextureSize: this.renderer.getContext().getParameter(this.renderer.getContext().MAX_TEXTURE_SIZE) as number,
+      xrSessionActive: Boolean(this.session),
+      graphicsApi: typeof WebGL2RenderingContext !== 'undefined' && context instanceof WebGL2RenderingContext
+        ? 'webgl2'
+        : 'webgl',
+      videoTextureColorSpace: 'srgb',
+      hdrPresentationVerified: false,
+      maxTextureSize: context.getParameter(context.MAX_TEXTURE_SIZE) as number,
       videoWidth: this.video.videoWidth,
       videoHeight: this.video.videoHeight,
       droppedFrames: quality?.droppedVideoFrames,

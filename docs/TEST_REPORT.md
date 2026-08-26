@@ -1,6 +1,6 @@
 # Localis 实际测试报告
 
-测试日期：2026-08-25（Asia/Shanghai）
+测试日期：2026-08-26（Asia/Shanghai）
 
 ## 环境
 
@@ -10,7 +10,7 @@
 - Windows 包内 FFmpeg `6.1.1-essentials`、ffprobe `4.0.2`、Electron `43.4.1`
 - GPU：NVIDIA GeForce RTX 5090 D
 - 浏览器：Codex 内置 Chromium，生产构建真实页面与媒体元素
-- 当前 LAN 地址：`192.168.31.188:8080`
+- 当前 LAN 地址：`<LAN-IP>:8080`（报告已脱敏）
 
 ## 已实际通过
 
@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | ESLint | 通过 | 全项目无 lint 错误或警告 |
 | TypeScript | 通过 | `tsc --noEmit` |
-| 单元/集成 | 12 个文件、62 个测试通过 | 配对、Range、扫描、字幕、文件夹选择器、HLS 分流、完整时长 seek、电脑端五档超分、真实 AI/FFmpeg 转码、电脑端云盘工作台、云盘协议与安全边界 |
+| 单元/集成 | 24 个文件、280 个测试通过 | 配对、Range、扫描、字幕、Localis 文件夹浏览器、HLS 分流、完整时长 seek、电脑端五档超分、真实 AI/FFmpeg 转码、HDR/高位深分类、设备显示档案、播放路径标签、电脑端云盘工作台、云盘协议与安全边界 |
 | 生产构建 | 通过 | Vinext 五阶段 client/RSC/SSR 构建 |
 | 编码器探测 | 通过 | NVENC、Media Foundation、libx264 运行时真实编码探测；本机自动选择 NVENC |
 | NVENC 路径 | 通过 | 完整集成套件真实生成 H.264/yuv420p + AAC fMP4 HLS |
@@ -45,7 +45,7 @@
 | 云盘媒体脱敏 | 通过 | 公共媒体 JSON 不含 `remoteFileId`、OpenList 地址或本机上游端口 |
 | 云盘缓存 | 通过 | 默认串行下载、50 GB 可配置硬配额、磁盘余量保护、`507`、原子重命名、崩溃 `.part` 清理及持久缓存清单 |
 | 云盘 → 电脑超分 | 通过 | WebDAV 提供真实 1280×720 MP4，电脑完整缓存并 ffprobe 后按需生成 1600×900 Standard HLS 分片；后续请求命中同一缓存 |
-| Windows 原生文件夹选择器 | 通过 | 真实系统窗口的取消、选中、自动重新扫描；中文路径另有单元测试 |
+| Localis 文件夹浏览器 | 通过 | 页面内置快捷位置、磁盘、面包屑、手动路径和扫描状态；仅允许已配对的本机回环访问，过滤文件与符号链接，并对失联位置设置有界超时 |
 | 本机/局域网管理边界 | 通过 | `localhost` 显示文件夹与云盘按钮；LAN 页面两类按钮数量均为 0，24 个媒体仍正常展示；LAN 云盘管理 API 返回 403 |
 | 原文件播放 | 通过 | 1280×720 H.264/AAC MP4 Range 直连，`readyState=4` |
 | HLS 兼容播放 | 通过 | AVI/MPEG-4 Part 2 + PCM 转 H.264/AAC，浏览器可播放 |
@@ -56,7 +56,7 @@
 | 浏览器控制台 | 通过 | 最终 localhost 播放器、云盘弹窗与 LAN 首页均为 0 个 error/warning |
 | Windows 安装版 | 通过 | NSIS 静默安装到隔离目录，包内 AI 运行时/模型/许可证齐全；安装后真实启动、扫描、传统超分与 AI 推理，再由自带卸载器移除 |
 | Windows 便携版 | 通过 | 最终 Release EXE 首次解压并真实启动；内置 ffprobe 扫描 14 个媒体，FFmpeg/NVENC 生成 4,765,048 字节传统分片，Real-ESRGAN 生成 2,750,628 字节 AI 分片 |
-| 桌面安全边界 | 通过 | localhost 自动完成电脑端配对并显示六位码；通过 `192.168.31.87` 请求的 LAN 客户端响应不含配对码，管理能力仍不可见 |
+| 桌面安全边界 | 通过 | localhost 自动完成电脑端配对并显示六位码；通过非回环 LAN 地址请求的客户端响应不含配对码，管理能力仍不可见 |
 | 最终桌面视觉 | 通过 | 最终便携版页面实际截图检查：绿色/石墨控制台、配对码卡片、播放器进度与电脑端超分状态正常；浏览器 0 个 error/warning |
 
 ### HLS 输出实测
@@ -129,11 +129,8 @@ AI SR: 1280x720 -> 2560x1440, 1-second segments, Real-ESRGAN NCNN Vulkan
 
 当前电脑端包含两条可验证路径：标准/高/极致使用空间缩放 + CAS，AI 清晰使用随包 Real-ESRGAN NCNN Vulkan 神经网络。当前测试证明电脑端模型与 HLS 输出有效，不等于 Vision Pro/Quest/PICO 真机已验收；发布真机或真实云盘兼容声明前，必须完成 [HEADSET_ACCEPTANCE.md](./HEADSET_ACCEPTANCE.md)。
 
-## 上次 Windows 产物
+## Windows 发布产物
 
-以下 EXE 是引入 AI 运行时后的上一轮可复现产物。本轮“AI 全片完成后才播放”的源码改动按项目约定没有重新打包，因此这些文件仍是旧的按需 AI 播放行为；下次明确发布版本时再统一重建并更新哈希。
+v0.4.0 的安装版与便携版由标签触发的 Windows Release 工作流从对应提交重新构建，并同时发布 CycloneDX SBOM 与 `SHA256SUMS.txt`。安装包内的 Web、媒体服务、Electron 载荷和诊断文件必须具有相同 commit SHA 与 `buildId`；工作流还会无界面启动打包后的 EXE 并校验 `/api/health` 身份。
 
-| 文件 | 大小 | SHA-256 |
-| --- | ---: | --- |
-| `Localis-Setup-0.3.0-x64.exe` | 208,766,617 bytes | `FE085493F66A721098E113D44A79AD1969BCA0ABC9C2F4D45F145FD5739F4772` |
-| `Localis-Portable-0.3.0-x64.exe` | 208,346,726 bytes | `C1CCEF4A42D2D08708CE16506EE2EA3AEF370EF2515A38AAA3282A3BB3AF7B3F` |
+最终文件大小和 SHA-256 以 [GitHub Releases](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) 中不可覆盖的 v0.4.0 资产为准，不再在源码文档中复制可能过期的本地构建哈希。当前流程尚未声明安装器逐字节可复现，也尚未提供商业代码签名。

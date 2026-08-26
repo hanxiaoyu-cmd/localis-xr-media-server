@@ -7,6 +7,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { getLanAddresses, saveMediaDirs } from './config';
 import { PairingAuth } from './auth';
 import { FolderPickerBusyError, FolderPickerUnsupportedError, isLoopbackAddress, pickLocalDirectory } from './folder-picker';
+import { FolderBrowser, FolderBrowserError } from './folder-browser';
 import { MediaDirectoryValidationError, MediaLibrary } from './media-library';
 import { ProgressStore } from './progress-store';
 import { parseByteRange, RangeNotSatisfiableError } from './range';
@@ -15,6 +16,7 @@ import { SourceChangedError, TranscodeCapacityError, TranscodeManager, type Tran
 import { parseServerSuperResolutionLevel, SERVER_SUPER_RESOLUTION_LEVELS, ServerSuperResolutionUnavailableError } from './super-resolution';
 import { CloudSourceError, CloudSourceManager } from './cloud-source-manager';
 import { QuarkConnectorError, QuarkDesktopConnector } from './quark-desktop-connector';
+import { getBuildMetadata, type BuildMetadataReadResult } from './build-metadata';
 import type { LocalisConfig } from './types';
 
 export interface AppDependencies {
@@ -26,6 +28,9 @@ export interface AppDependencies {
   clouds?: CloudSourceManager;
   quark?: QuarkDesktopConnector;
   pickDirectory?: () => Promise<string | undefined>;
+  folderBrowser?: FolderBrowser;
+  isFolderBrowserLoopback?: (remoteAddress: string | undefined) => boolean;
+  buildMetadata?: BuildMetadataReadResult | Promise<BuildMetadataReadResult>;
 }
 
 const mediaTypes: Record<string, string> = {
@@ -107,7 +112,10 @@ async function sendFileWithRange(req: Request, res: Response, filePath: string, 
 
 export function createApiApp(deps: AppDependencies) {
   const { config, library, auth, progress, transcodes, clouds, quark } = deps;
+  const buildMetadata = Promise.resolve(deps.buildMetadata ?? getBuildMetadata());
   const selectDirectory = deps.pickDirectory ?? (() => pickLocalDirectory(config.mediaDirs[0]));
+  const folderBrowser = deps.folderBrowser ?? new FolderBrowser(config);
+  const isFolderBrowserLoopback = deps.isFolderBrowserLoopback ?? isLoopbackAddress;
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', false);
@@ -143,10 +151,12 @@ export function createApiApp(deps: AppDependencies) {
     next();
   });
 
-  app.get('/api/health', (_req, res) => {
+  app.get('/api/health', async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
     res.json({
       ok: true,
       service: 'localis',
+      build: await buildMetadata,
       mediaCount: library.items.size,
       encoder: transcodes.encoder,
       aiSuperResolution: {
@@ -168,11 +178,13 @@ export function createApiApp(deps: AppDependencies) {
 
   app.use('/api', auth.middleware);
 
-  app.get('/api/server', (req, res) => {
+  app.get('/api/server', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
     const protocol = req.secure ? 'https' : 'http';
     const lanAddresses = getLanAddresses();
     res.json({
       name: 'Localis',
+      build: await buildMetadata,
       secure: req.secure,
       secureContextRequiredForWebXR: true,
       host: safeHost(req),
@@ -215,6 +227,16 @@ export function createApiApp(deps: AppDependencies) {
       await saveMediaDirs(config, [...config.mediaDirs, directory]);
       await library.scan();
       res.status(201).json({ mediaDirs: config.mediaDirs.map((entry) => path.basename(entry)), items: library.list() });
+    } catch (error) { next(error); }
+  });
+  app.get('/api/library/folders/browse', async (req, res, next) => {
+    try {
+      res.set('Cache-Control', 'no-store');
+      if (!isFolderBrowserLoopback(req.socket.remoteAddress)) {
+        return res.status(403).json({ error: 'local_management_required', message: '请在运行 Localis 的电脑上浏览文件夹。' });
+      }
+      const result = await folderBrowser.browse(req.query.path);
+      res.json(result);
     } catch (error) { next(error); }
   });
   app.post('/api/library/folders/pick', async (req, res, next) => {
@@ -361,10 +383,16 @@ export function createApiApp(deps: AppDependencies) {
     try { res.json(requireQuark().cancelDownload(String(req.params.id))); } catch (error) { next(error); }
   });
 
-  app.get('/api/media/:id', (req, res) => {
+  app.get('/api/media/:id', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
     const item = library.list().find((candidate) => candidate.id === req.params.id);
     if (!item) return res.status(404).json({ error: 'media_not_found' });
-    res.json({ item, progress: progress.get(item.id), transcode: transcodes.statusForItem(library.get(item.id)!) });
+    res.json({
+      item,
+      progress: progress.get(item.id),
+      transcode: transcodes.statusForItem(library.get(item.id)!),
+      build: await buildMetadata,
+    });
   });
   app.patch('/api/media/:id', async (req, res, next) => {
     try {
@@ -463,14 +491,19 @@ export function createApiApp(deps: AppDependencies) {
     }
     return parseServerSuperResolutionLevel(raw);
   };
-  const hlsStatus = (req: Request, res: Response) => {
+  const hlsStatus = (req: Request, res: Response, forceCompatibility: boolean) => {
     const item = library.get(String(req.params.id));
     if (!item) return res.status(404).json({ error: 'media_not_found' });
     const level = requestedSuperResolution(req, res);
     if (!level) return;
-    res.json(transcodes.statusForItem(item, level));
+    res.json(transcodes.statusForItem(item, level, forceCompatibility));
   };
-  const hlsAsset = async (req: Request, res: Response, next: NextFunction) => {
+  const hlsAsset = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    forceCompatibility: boolean,
+  ) => {
     try {
       let item = library.get(String(req.params.id));
       if (!item) return res.status(404).json({ error: 'media_not_found' });
@@ -503,7 +536,9 @@ export function createApiApp(deps: AppDependencies) {
         // Repeated AI progress checks reuse the active job. The first request
         // already holds the cloud-cache lease until precompute finishes; do
         // not create one additional lease timer per second for a long movie.
-        job = item.sourceType !== 'local' ? transcodes.jobForItem(item, level) : undefined;
+        job = item.sourceType !== 'local'
+          ? transcodes.jobForItem(item, level, forceCompatibility)
+          : undefined;
         if (job?.state === 'failed') job = undefined;
         if (item.sourceType !== 'local' && !job) {
           if (!clouds) throw new CloudSourceError('cloud_manager_unavailable', '云盘管理器尚未启动。', 503);
@@ -524,13 +559,13 @@ export function createApiApp(deps: AppDependencies) {
           }
         }
         try {
-          if (!job) job = await transcodes.ensure(item, level);
+          if (!job) job = await transcodes.ensure(item, level, forceCompatibility);
         } catch (error) {
           if (!(error instanceof SourceChangedError) || item.sourceType !== 'local') throw error;
           await library.scan();
           item = library.get(String(req.params.id));
           if (!item) return res.status(404).json({ error: 'media_not_found' });
-          job = await transcodes.ensure(item, level);
+          job = await transcodes.ensure(item, level, forceCompatibility);
         } finally {
           if (releaseCloudLease) {
             if (job && (job.state === 'running' || job.state === 'preparing')) {
@@ -548,7 +583,7 @@ export function createApiApp(deps: AppDependencies) {
             }
           }
         }
-      } else job = transcodes.jobForItem(item, level);
+      } else job = transcodes.jobForItem(item, level, forceCompatibility);
       if (!job) {
         releaseSegmentCloudLease?.();
         return res.status(404).json({ error: 'hls_asset_not_ready' });
@@ -556,7 +591,7 @@ export function createApiApp(deps: AppDependencies) {
       transcodes.renew(job);
       const playlistWaitMs = job.strategy === 'precompute' ? 0 : 5_000;
       if (req.params.file === 'index.m3u8' && !await transcodes.waitForPlaylist(job, playlistWaitMs)) {
-        const status = transcodes.statusForItem(item, level);
+        const status = transcodes.statusForItem(item, level, forceCompatibility);
         return res.status(202).set('Retry-After', '1').json({
           state: job.state,
           stage: level === 'ai' ? 'ai-precompute' : 'transcode',
@@ -587,11 +622,17 @@ export function createApiApp(deps: AppDependencies) {
       pipeFile(res, asset, next);
     } catch (error) { next(error); }
   };
-  app.get('/api/media/:id/hls/:level/status', hlsStatus);
-  app.get('/api/media/:id/hls/:level/:file', hlsAsset);
+  // This path is deliberately encoded in the URL rather than a query string:
+  // native HLS clients resolve relative segment URLs without inheriting the
+  // manifest query. Keeping `compat` in the path makes every playlist, init,
+  // and segment request select the same forced-transcode job.
+  app.get('/api/media/:id/hls/compat/status', (req, res) => hlsStatus(req, res, true));
+  app.get('/api/media/:id/hls/compat/:file', (req, res, next) => hlsAsset(req, res, next, true));
+  app.get('/api/media/:id/hls/:level/status', (req, res) => hlsStatus(req, res, false));
+  app.get('/api/media/:id/hls/:level/:file', (req, res, next) => hlsAsset(req, res, next, false));
   // Legacy URLs remain available as the non-enhanced compatibility stream.
-  app.get('/api/media/:id/hls/status', hlsStatus);
-  app.get('/api/media/:id/hls/:file', hlsAsset);
+  app.get('/api/media/:id/hls/status', (req, res) => hlsStatus(req, res, false));
+  app.get('/api/media/:id/hls/:file', (req, res, next) => hlsAsset(req, res, next, false));
 
   app.put('/api/progress/:id', async (req, res, next) => {
     try {
@@ -609,6 +650,9 @@ export function createApiApp(deps: AppDependencies) {
     }
     if (error instanceof FolderPickerUnsupportedError) {
       return res.status(501).json({ error: 'folder_picker_unsupported', message: error.message });
+    }
+    if (error instanceof FolderBrowserError) {
+      return res.status(error.status).json({ error: error.code, message: error.message });
     }
     if (error instanceof MediaDirectoryValidationError) {
       return res.status(400).json({ error: 'invalid_media_directory', message: error.message });

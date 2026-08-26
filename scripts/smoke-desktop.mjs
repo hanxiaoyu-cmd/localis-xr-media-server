@@ -21,6 +21,12 @@ while (Date.now() < deadline) {
 assert.ok(health, `Localis did not become ready at ${baseUrl}`);
 assert.equal(health.ok, true);
 assert.equal(health.service, 'localis');
+assert.equal(health.build?.available, true, 'The packaged server did not expose a verified build identity');
+assert.equal(health.build.metadata.schemaVersion, 1);
+assert.match(health.build.metadata.buildId, /^[0-9a-f]{64}$/);
+if (process.env.LOCALIS_COMMIT_SHA) {
+  assert.equal(health.build.metadata.commitSha, process.env.LOCALIS_COMMIT_SHA.toLowerCase());
+}
 assert.ok(Number(health.mediaCount) > 0, 'The packaged ffprobe did not scan the test media');
 assert.equal(health.aiSuperResolution?.available, true, 'The packaged AI runtime/model was not detected');
 
@@ -102,6 +108,7 @@ process.stdout.write(`${JSON.stringify({
   ok: true,
   mediaCount: health.mediaCount,
   encoder: health.encoder,
+  buildId: health.build.metadata.buildId,
   pairingCodeVisibleOnComputer: true,
   lanPairCodeHidden,
   superResolution: `${media.width}x${media.height} -> ${transcodeStatus.plan.outputWidth}x${transcodeStatus.plan.outputHeight}`,

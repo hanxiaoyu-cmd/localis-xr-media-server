@@ -56,6 +56,8 @@ function cloudMedia(remoteFileId: string, size: number, sourceType: 'webdav' | '
     audioTracks: [],
     subtitleTracks: [],
     directPlay: true,
+    compatibilityMode: 'direct',
+    compatibilityReason: '测试媒体',
     sourceType,
     remoteFileId,
     path: `${sourceType}:${remoteFileId}`,

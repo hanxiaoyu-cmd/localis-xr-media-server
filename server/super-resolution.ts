@@ -28,6 +28,52 @@ export interface ServerSuperResolutionPlan extends ServerSuperResolutionProfile 
 
 export class ServerSuperResolutionUnavailableError extends Error {}
 
+export type HdrToneMapTransfer = 'smpte2084' | 'arib-std-b67';
+
+function explicitDolbyVisionTransfer(colorTransfer?: string): HdrToneMapTransfer | undefined {
+  const normalized = colorTransfer?.trim().toLowerCase();
+  if (normalized === 'smpte2084' || normalized === 'smpte_st_2084' || normalized === 'pq') return 'smpte2084';
+  if (normalized === 'arib-std-b67' || normalized === 'arib_std_b67' || normalized === 'hlg') return 'arib-std-b67';
+  return undefined;
+}
+
+/**
+ * Returns the transfer function Localis can safely use for an HDR-to-SDR
+ * conversion. Dolby Vision can have different base layers, so its dynamic
+ * range label alone is deliberately insufficient evidence.
+ */
+export function hdrToneMapTransfer(
+  item: Pick<MediaItem, 'dynamicRange' | 'colorTransfer'>,
+): HdrToneMapTransfer | undefined {
+  if (item.dynamicRange === 'hdr10') return 'smpte2084';
+  if (item.dynamicRange === 'hlg') return 'arib-std-b67';
+  if (item.dynamicRange === 'dolby-vision') return explicitDolbyVisionTransfer(item.colorTransfer);
+  return undefined;
+}
+
+export function isHdrToneMappedToSdr(
+  item: Pick<MediaItem, 'dynamicRange' | 'colorTransfer'>,
+) {
+  return hdrToneMapTransfer(item) !== undefined;
+}
+
+function needsEightBitDither(
+  item: Pick<MediaItem, 'dynamicRange' | 'colorTransfer' | 'bitDepth'>,
+) {
+  return (item.bitDepth || 0) > 8 || isHdrToneMappedToSdr(item);
+}
+
+function casFilter(
+  item: Pick<MediaItem, 'dynamicRange' | 'colorTransfer'>,
+  sharpness: number,
+) {
+  // tone-map leaves a planar GBR float frame. CAS uses a plane bitmask, so
+  // planes=1 would sharpen only G and create coloured edges. Ordinary YUV SDR
+  // keeps the intended luma-only planes=1 behaviour.
+  const planes = isHdrToneMappedToSdr(item) ? 7 : 1;
+  return `cas=strength=${sharpness.toFixed(2)}:planes=${planes}`;
+}
+
 // H.264 Annex A, Level 5.2. Keeping the generated HLS inside these limits is
 // important for hardware decoders used by visionOS and standalone headsets.
 export const H264_LEVEL_52_MAX_MACROBLOCKS = 36_864;
@@ -241,7 +287,7 @@ export function serverSuperResolutionPlan(
 }
 
 export function buildVideoFilters(
-  item: Pick<MediaItem, 'width' | 'height' | 'sampleAspectRatio' | 'stereo' | 'frameRate'>,
+  item: Pick<MediaItem, 'width' | 'height' | 'sampleAspectRatio' | 'stereo' | 'frameRate' | 'dynamicRange' | 'colorTransfer' | 'bitDepth'>,
   level: ServerSuperResolutionLevel,
   pixelFormat: 'yuv420p' | 'nv12',
 ) {
@@ -250,7 +296,7 @@ export function buildVideoFilters(
   }
   const sourceFps = Math.max(1, item.frameRate || 30);
   const fps = Math.min(60, Math.max(1, item.frameRate || 60));
-  const filters: string[] = [];
+  const filters: string[] = [...buildHdrToSdrFilters(item)];
   if (level === 'off') {
     const plan = serverSuperResolutionPlan(item, level);
     if (plan.outputWidth && plan.outputHeight) {
@@ -268,17 +314,66 @@ export function buildVideoFilters(
       throw new ServerSuperResolutionUnavailableError(plan.reason || '无法安全生成电脑端超分流。');
     }
     filters.push(`zscale=w=${plan.outputWidth}:h=${plan.outputHeight}:f=${profile.interpolation}`);
-    filters.push(`cas=strength=${profile.sharpness.toFixed(2)}:planes=1`);
+    filters.push(casFilter(item, profile.sharpness));
   }
   filters.push('setsar=1');
   if (!item.frameRate) filters.push("fps='min(source_fps,60)'");
   else if (sourceFps > 60) filters.push(`fps=${fps}`);
+  if (needsEightBitDither(item)) {
+    filters.push('zscale=dither=error_diffusion');
+  }
   filters.push(`format=${pixelFormat}`);
   return { filters, fps };
 }
 
+/**
+ * WebXR browsers do not expose a dependable HDR presentation path. Whenever
+ * Localis has to create an 8-bit compatibility stream, convert HDR on the PC
+ * instead of letting an implicit pixel-format conversion produce grey or
+ * clipped output. Original-file playback remains available as an explicit
+ * device-dependent attempt in the player.
+ */
+export function buildHdrToSdrFilters(item: Pick<MediaItem, 'dynamicRange' | 'colorTransfer' | 'colorRange'>) {
+  const inputTransfer = hdrToneMapTransfer(item);
+  if (!inputTransfer) return [];
+  // Some otherwise trustworthy HDR sources carry PQ/HLG or mastering side
+  // data but omit primaries/matrix tags. zscale cannot construct a conversion
+  // path from those incomplete frame tags, so establish the standards-defined
+  // BT.2020 input description before linearization. This also keeps malformed
+  // SDR-looking ancillary tags from defeating an authoritative HDR signal.
+  return [
+    `setparams=range=${item.colorRange?.trim().toLowerCase() === 'pc' || item.colorRange?.trim().toLowerCase() === 'full' ? 'pc' : 'tv'}:color_primaries=bt2020:color_trc=${inputTransfer}:colorspace=bt2020nc`,
+    'zscale=t=linear:npl=100',
+    'format=gbrpf32le',
+    'tonemap=tonemap=hable:desat=0',
+    'zscale=p=bt709:t=bt709:m=bt709:r=tv',
+  ];
+}
+
+export function buildAiFrameExtractionFilters(
+  item: Pick<MediaItem, 'dynamicRange' | 'colorTransfer' | 'bitDepth'>,
+  fps: number,
+  width: number,
+  height: number,
+  duration: number,
+) {
+  const filters = [
+    ...buildHdrToSdrFilters(item),
+    `fps=${fps}`,
+    `scale=w=${width}:h=${height}:flags=lanczos`,
+    `tpad=stop_mode=clone:stop_duration=${duration.toFixed(6)}`,
+    'setsar=1',
+  ];
+  // Let zscale perform the precision reduction after all colour/size work;
+  // the immediately following format negotiation makes error diffusion apply
+  // to the actual 8-bit RGB frames consumed by the AI model.
+  if (needsEightBitDither(item)) filters.push('zscale=dither=error_diffusion');
+  filters.push('format=rgb24');
+  return filters;
+}
+
 export function buildVideoPipeline(
-  item: Pick<MediaItem, 'width' | 'height' | 'sampleAspectRatio' | 'stereo' | 'frameRate'> & { projection?: MediaItem['projection'] },
+  item: Pick<MediaItem, 'width' | 'height' | 'sampleAspectRatio' | 'stereo' | 'frameRate' | 'dynamicRange' | 'colorTransfer' | 'bitDepth'> & { projection?: MediaItem['projection'] },
   level: ServerSuperResolutionLevel,
   pixelFormat: 'yuv420p' | 'nv12',
 ): { fps: number; filters?: string[]; filterComplex?: string; outputLabel?: string } {
@@ -290,8 +385,10 @@ export function buildVideoPipeline(
   if (!plan.outputWidth || !plan.outputHeight) return simple;
 
   const profile = SERVER_SUPER_RESOLUTION_PROFILES[level];
+  const hdrToSdr = buildHdrToSdrFilters(item);
   const post = [
     ...(!item.frameRate ? ["fps='min(source_fps,60)'"] : item.frameRate > 60 ? [`fps=${simple.fps}`] : []),
+    ...(needsEightBitDither(item) ? ['zscale=dither=error_diffusion'] : []),
     `format=${pixelFormat}`,
   ];
   if (item.projection === 'equirect360') {
@@ -302,6 +399,7 @@ export function buildVideoPipeline(
     return {
       fps: simple.fps,
       filters: [
+        ...hdrToSdr,
         `v360=input=equirect:output=equirect:in_stereo=${stereo}:out_stereo=${stereo}:w=${width}:h=${height}:interp=${interpolation}`,
         // Never apply a packed-frame spatial filter here. On SBS/TB it would
         // sample across the eye boundary, and on mono it would break the 360°
@@ -314,14 +412,14 @@ export function buildVideoPipeline(
   if (level === 'off' || item.stereo === 'mono') return simple;
   const enhance = (width: number, height: number) => [
     `zscale=w=${width}:h=${height}:f=${profile.interpolation}`,
-    `cas=strength=${profile.sharpness.toFixed(2)}:planes=1`,
+    casFilter(item, profile.sharpness),
     'setsar=1',
   ].join(',');
 
   if (item.stereo === 'sbs') {
     const eyeWidth = Math.max(2, Math.floor(plan.outputWidth / 4) * 2);
     const graph = [
-      '[0:v:0]split=2[sr_left_source][sr_right_source]',
+      `[0:v:0]${hdrToSdr.length ? `${hdrToSdr.join(',')},` : ''}split=2[sr_left_source][sr_right_source]`,
       `[sr_left_source]crop=w=iw/2:h=ih:x=0:y=0,${enhance(eyeWidth, plan.outputHeight)}[sr_left]`,
       `[sr_right_source]crop=w=iw/2:h=ih:x=iw/2:y=0,${enhance(eyeWidth, plan.outputHeight)}[sr_right]`,
       `[sr_left][sr_right]hstack=inputs=2,${post.join(',')}[sr_video]`,
@@ -331,7 +429,7 @@ export function buildVideoPipeline(
 
   const eyeHeight = Math.max(2, Math.floor(plan.outputHeight / 4) * 2);
   const graph = [
-    '[0:v:0]split=2[sr_top_source][sr_bottom_source]',
+    `[0:v:0]${hdrToSdr.length ? `${hdrToSdr.join(',')},` : ''}split=2[sr_top_source][sr_bottom_source]`,
     `[sr_top_source]crop=w=iw:h=ih/2:x=0:y=0,${enhance(plan.outputWidth, eyeHeight)}[sr_top]`,
     `[sr_bottom_source]crop=w=iw:h=ih/2:x=0:y=ih/2,${enhance(plan.outputWidth, eyeHeight)}[sr_bottom]`,
     `[sr_top][sr_bottom]vstack=inputs=2,${post.join(',')}[sr_video]`,

@@ -4,8 +4,11 @@ import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'n
 import path from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { LocalisConfig, MediaItem } from './types';
+import { isHdrDynamicRange } from './media-compatibility';
 import {
+  buildAiFrameExtractionFilters,
   buildVideoPipeline,
+  isHdrToneMappedToSdr,
   isAiSuperResolutionLevel,
   serverSuperResolutionPlan,
   SERVER_SUPER_RESOLUTION_PROFILES,
@@ -20,7 +23,7 @@ export type JobState = 'preparing' | 'running' | 'ready' | 'failed';
 export class SourceChangedError extends Error {}
 export class TranscodeCapacityError extends Error {}
 
-export const TRANSCODE_CACHE_SCHEMA = 'v8-precomputed-ai-sr';
+export const TRANSCODE_CACHE_SCHEMA = 'v10-display-signal-dither';
 
 export interface TranscodeJob {
   key: string;
@@ -85,6 +88,20 @@ async function completePlaylist(directory: string, playlist: string) {
   }
   if (![...names].every((name) => /^(init\.mp4|seg_\d{6}\.(?:m4s|ts))$/.test(name))) return false;
   return (await Promise.all([...names].map((name) => exists(path.join(directory, name))))).every(Boolean);
+}
+
+async function waitForCompletePlaylist(directory: string, playlistPath: string, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const playlist = await readFile(playlistPath, 'utf8');
+      if (await completePlaylist(directory, playlist)) return true;
+    } catch {
+      // FFmpeg may still be completing its final atomic playlist rename.
+    }
+    await wait(25);
+  }
+  return false;
 }
 
 function segmentDuration(job: TranscodeJob, index: number) {
@@ -215,8 +232,18 @@ export class TranscodeManager {
     return available;
   }
 
-  decideMode(item: MediaItem, superResolution: ServerSuperResolutionLevel = 'off'): TranscodeMode {
+  decideMode(
+    item: MediaItem,
+    superResolution: ServerSuperResolutionLevel = 'off',
+    forceCompatibility = false,
+  ): TranscodeMode {
+    // A client-side rejection (for example an unverified WebXR envelope or a
+    // non-smooth MediaCapabilities result) must not be answered with a remux
+    // of the same risky video. The dedicated compatibility route sets this
+    // flag and therefore guarantees the existing H.264 8-bit SDR/AAC pipeline.
+    if (item.kind === 'video' && forceCompatibility) return 'transcode';
     if (item.kind === 'video' && superResolution !== 'off') return 'transcode';
+    if (item.kind === 'video' && isHdrDynamicRange(item.dynamicRange)) return 'transcode';
     const h264 = item.videoCodec === 'h264'
       && item.pixelFormat === 'yuv420p'
       && (!item.videoProfile || ['Constrained Baseline', 'Baseline', 'Main', 'High'].includes(item.videoProfile))
@@ -227,7 +254,12 @@ export class TranscodeManager {
     return 'transcode';
   }
 
-  private jobKey(item: MediaItem, mode: TranscodeMode, superResolution: ServerSuperResolutionLevel) {
+  private jobKey(
+    item: MediaItem,
+    mode: TranscodeMode,
+    superResolution: ServerSuperResolutionLevel,
+    forceCompatibility = false,
+  ) {
     return createHash('sha256')
       .update([
         TRANSCODE_CACHE_SCHEMA,
@@ -236,16 +268,27 @@ export class TranscodeManager {
         item.modifiedAt,
         mode,
         superResolution,
+        forceCompatibility ? 'forced-compatibility' : 'adaptive',
         item.projection,
         item.stereo,
         item.sampleAspectRatio || '1:1',
+        item.dynamicRange ?? 'missing-dynamic-range',
+        item.bitDepth ?? 'missing-bit-depth',
+        item.colorPrimaries ?? 'missing-color-primaries',
+        item.colorTransfer ?? 'missing-color-transfer',
+        item.colorSpace ?? 'missing-color-space',
+        item.colorRange ?? 'missing-color-range',
         mode === 'transcode' ? this.encoder : 'copy',
       ].join('|'))
       .digest('hex')
       .slice(0, 32);
   }
 
-  async ensure(item: MediaItem, requestedSuperResolution: ServerSuperResolutionLevel = 'off'): Promise<TranscodeJob> {
+  async ensure(
+    item: MediaItem,
+    requestedSuperResolution: ServerSuperResolutionLevel = 'off',
+    forceCompatibility = false,
+  ): Promise<TranscodeJob> {
     const superResolution = item.kind === 'video' ? requestedSuperResolution : 'off';
     const requestedPlan = serverSuperResolutionPlan(item, superResolution);
     if (superResolution !== 'off' && !requestedPlan.available) {
@@ -261,8 +304,8 @@ export class TranscodeManager {
     if (item.sourceType !== 'local' && item.size > 0 && current.size !== item.size) {
       throw new SourceChangedError('云盘缓存文件不完整，请重新缓存');
     }
-    const mode = this.decideMode(item, superResolution);
-    const key = this.jobKey(item, mode, superResolution);
+    const mode = this.decideMode(item, superResolution, forceCompatibility);
+    const key = this.jobKey(item, mode, superResolution, forceCompatibility);
     // A viewer may return while the idle sweeper is still terminating the
     // previous process and deleting this cache directory. Wait for that
     // cancellation so the replacement cannot race the old cleanup.
@@ -546,6 +589,9 @@ export class TranscodeManager {
         if (activePipeline.filters) args.push('-vf', activePipeline.filters.join(','));
         if (job.encoder !== 'h264_mf') args.push('-sc_threshold', '0');
         args.push(...this.encoderArgs(job.encoder, job.superResolution));
+        if (isHdrToneMappedToSdr(item)) {
+          args.push('-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv');
+        }
       }
     }
 
@@ -584,6 +630,9 @@ export class TranscodeManager {
     if (encoder !== 'h264_mf') args.push('-sc_threshold', '0');
     args.push(
       ...this.encoderArgs(encoder, job.superResolution),
+      ...(isHdrToneMappedToSdr(item)
+        ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv']
+        : []),
       '-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '192k', '-ar', '48000', '-ac', '2',
       '-af', 'aresample=async=1:first_pts=0',
       '-max_muxing_queue_size', '2048', '-muxdelay', '0', '-muxpreload', '0',
@@ -711,7 +760,7 @@ export class TranscodeManager {
         '-hide_banner', '-nostdin', '-y', '-loglevel', 'warning',
         '-ss', start.toFixed(6), '-i', item.path, '-t', duration.toFixed(6),
         '-an', '-sn', '-dn',
-        '-vf', `fps=${fps},scale=w=${aiInputWidth}:h=${aiInputHeight}:flags=lanczos,tpad=stop_mode=clone:stop_duration=${duration.toFixed(6)},setsar=1`,
+        '-vf', buildAiFrameExtractionFilters(item, fps, aiInputWidth, aiInputHeight, duration).join(','),
         '-frames:v', String(expectedFrames), '-start_number', '1',
         path.join(inputDirectory, 'frame_%06d.png'),
       ], 'extracting');
@@ -765,6 +814,9 @@ export class TranscodeManager {
             '-g', String(gop), '-keyint_min', String(gop), '-force_key_frames', 'expr:gte(t,n_forced*2)',
             ...(encoder !== 'h264_mf' ? ['-sc_threshold', '0'] : []),
             ...this.encoderArgs(encoder, 'ai'),
+            ...(isHdrToneMappedToSdr(item)
+              ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv']
+              : []),
             '-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '192k', '-ar', '48000', '-ac', '2',
             '-af', 'aresample=async=1:first_pts=0',
             '-max_muxing_queue_size', '2048', '-muxdelay', '0', '-muxpreload', '0',
@@ -972,9 +1024,17 @@ export class TranscodeManager {
       job.process = undefined;
       if (job.cancelled) return;
       if (code === 0) {
-        job.state = 'ready';
-        job.progressSeconds = item.duration;
-        void this.pruneCache(job.directory);
+        void waitForCompletePlaylist(job.directory, job.playlistPath).then((complete) => {
+          if (job.cancelled) return;
+          if (!complete) {
+            settled = false;
+            fail('FFmpeg 已退出，但 HLS 播放清单或分片不完整');
+            return;
+          }
+          job.state = 'ready';
+          job.progressSeconds = item.duration;
+          void this.pruneCache(job.directory);
+        });
       } else {
         settled = false;
         fail(stderr.trim() || `FFmpeg exited with code ${code}`);
@@ -1098,10 +1158,14 @@ export class TranscodeManager {
     return this.prunePromise;
   }
 
-  statusForItem(item: MediaItem, requestedSuperResolution: ServerSuperResolutionLevel = 'off') {
+  statusForItem(
+    item: MediaItem,
+    requestedSuperResolution: ServerSuperResolutionLevel = 'off',
+    forceCompatibility = false,
+  ) {
     const superResolution = item.kind === 'video' ? requestedSuperResolution : 'off';
-    const mode = this.decideMode(item, superResolution);
-    const key = this.jobKey(item, mode, superResolution);
+    const mode = this.decideMode(item, superResolution, forceCompatibility);
+    const key = this.jobKey(item, mode, superResolution, forceCompatibility);
     const job = this.jobs.get(key);
     const plan = job?.superResolutionPlan ?? serverSuperResolutionPlan(item, superResolution);
     const aiUnavailable = isAiSuperResolutionLevel(superResolution) && !this.aiSuperResolutionAvailable;
@@ -1121,6 +1185,7 @@ export class TranscodeManager {
       return {
         state: job.state,
         mode: job.mode,
+        forcedCompatibility: forceCompatibility,
         encoder: job.encoder,
         progressSeconds: generatedSeconds,
         durationSeconds: item.duration,
@@ -1156,6 +1221,7 @@ export class TranscodeManager {
       ? {
           state: job.state,
           mode: job.mode,
+          forcedCompatibility: forceCompatibility,
           encoder: job.encoder,
           progressSeconds: job.progressSeconds,
           durationSeconds: item.duration,
@@ -1175,6 +1241,7 @@ export class TranscodeManager {
       : {
           state: superResolution !== 'off' && (!plan.available || aiUnavailable) ? 'unavailable' : 'idle',
           mode,
+          forcedCompatibility: forceCompatibility,
           encoder: mode === 'transcode' ? this.encoder : 'copy',
           progressSeconds: 0,
           durationSeconds: item.duration,
@@ -1192,10 +1259,14 @@ export class TranscodeManager {
         };
   }
 
-  jobForItem(item: MediaItem, requestedSuperResolution: ServerSuperResolutionLevel = 'off') {
+  jobForItem(
+    item: MediaItem,
+    requestedSuperResolution: ServerSuperResolutionLevel = 'off',
+    forceCompatibility = false,
+  ) {
     const superResolution = item.kind === 'video' ? requestedSuperResolution : 'off';
-    const mode = this.decideMode(item, superResolution);
-    return this.jobs.get(this.jobKey(item, mode, superResolution));
+    const mode = this.decideMode(item, superResolution, forceCompatibility);
+    return this.jobs.get(this.jobKey(item, mode, superResolution, forceCompatibility));
   }
 
   shutdown() {

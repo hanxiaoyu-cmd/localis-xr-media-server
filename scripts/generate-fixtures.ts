@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 const root = process.cwd();
@@ -71,6 +71,12 @@ run('H.264 High10 兼容转码样本', [
   '-t', '1', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
   '-profile:v', 'high10', 'high10-incompatible.mp4',
 ]);
+run('HDR10 安全映射样本', [
+  '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24',
+  '-t', '1', '-vf', 'format=yuv420p10le,setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc',
+  '-c:v', 'ffv1', '-color_range', 'tv', '-color_primaries', 'bt2020', '-color_trc', 'smpte2084',
+  '-colorspace', 'bt2020nc', 'hdr10-source.mkv',
+]);
 run('非方形像素比例样本', [
   '-f', 'lavfi', '-i', 'testsrc=size=720x576:rate=25',
   '-vf', 'setsar=16/15', '-t', '1', '-c:v', 'ffv1', 'anamorphic-legacy.mkv',
@@ -88,5 +94,6 @@ run('AC-3 音频样本', [
   '-t', '1', '-c:a', 'ac3', 'common-audio.ac3',
 ]);
 run('FLAC 音频', ['-f', 'lavfi', '-i', 'sine=frequency=523.25:sample_rate=48000', '-t', '4', '-c:a', 'flac', 'localis-tone.flac']);
+writeFileSync(path.join(outputDir, 'flat-demo.zh-CN.srt'), '1\n00:00:00,000 --> 00:00:02,500\nLocalis 局域网播放测试\n', 'utf8');
 
 console.log(`测试媒体已写入 ${outputDir}`);

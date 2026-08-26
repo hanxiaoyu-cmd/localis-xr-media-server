@@ -4,6 +4,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import type { PlaybackProgress, PublicMediaItem } from '@/server/types';
+import { FolderBrowserModal } from './folder-browser-modal';
 
 interface LibraryResponse {
   items: PublicMediaItem[];
@@ -157,9 +158,6 @@ export function MediaLibraryView() {
   const [pairCode, setPairCode] = useState('');
   const [pairError, setPairError] = useState('');
   const [folderOpen, setFolderOpen] = useState(false);
-  const [folderPath, setFolderPath] = useState('');
-  const [folderBusy, setFolderBusy] = useState(false);
-  const [folderError, setFolderError] = useState('');
   const [cloudOpen, setCloudOpen] = useState(false);
   const [cloudProvider, setCloudProvider] = useState<'quark' | 'baidu'>('baidu');
   const [cloudSources, setCloudSources] = useState<CloudSourceSummary[]>([]);
@@ -214,6 +212,7 @@ export function MediaLibraryView() {
   }, []);
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
+      if (document.querySelector('[data-folder-browser-dialog]')) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         document.querySelector<HTMLInputElement>('#media-search')?.focus();
@@ -250,34 +249,9 @@ export function MediaLibraryView() {
     }
   };
 
-  const addFolder = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!folderPath.trim()) return;
-    try {
-      await jsonFetch('/api/library/folders', { method: 'POST', body: JSON.stringify({ path: folderPath }) });
-      setFolderPath('');
-      setFolderOpen(false);
-      await loadLibrary();
-    } catch (cause) {
-      setFolderError(cause instanceof Error ? cause.message : '添加文件夹失败');
-    }
-  };
-
-  const pickFolder = async () => {
-    setFolderBusy(true);
-    setFolderError('');
-    try {
-      const result = await jsonFetch<{ cancelled: boolean; selected?: string }>('/api/library/folders/pick', { method: 'POST', body: '{}' });
-      if (!result.cancelled) {
-        setFolderPath('');
-        setFolderOpen(false);
-        await loadLibrary();
-      }
-    } catch (cause) {
-      setFolderError(cause instanceof Error ? cause.message : '无法打开文件夹选择器');
-    } finally {
-      setFolderBusy(false);
-    }
+  const addLocalFolder = async (folderPath: string) => {
+    await jsonFetch('/api/library/folders', { method: 'POST', body: JSON.stringify({ path: folderPath }) });
+    await loadLibrary();
   };
 
   const refreshLibrary = async () => {
@@ -652,7 +626,7 @@ export function MediaLibraryView() {
           <div><p className="eyebrow">YOUR PRIVATE CINEMA</p><h1>晚上好，继续探索。</h1></div>
           {(server?.canPickLocalFolder || server?.canManageCloud) && <div className="library-actions">
             {server?.canManageCloud && <button className="cloud-button" onClick={openCloudManager}><span className="cloud-icon" aria-hidden="true" />连接云盘{server.cloudSourceCount > 0 ? ` · ${server.cloudSourceCount}` : ''}</button>}
-            {server?.canPickLocalFolder && <button className="add-button" onClick={() => { setFolderError(''); setFolderOpen(true); }}><span className="folder-icon" aria-hidden="true" />添加媒体文件夹</button>}
+            {server?.canPickLocalFolder && <button className="add-button" onClick={() => setFolderOpen(true)}><span className="folder-icon" aria-hidden="true" />添加媒体文件夹</button>}
           </div>}
         </div>
 
@@ -673,7 +647,7 @@ export function MediaLibraryView() {
             </div>
           </article>
         ) : !loading && (
-          <div className="empty-state"><span>＋</span><h2>添加第一个媒体文件夹</h2><p>电脑上的文件不会离开当前局域网。</p>{server?.canPickLocalFolder && <button className="add-button" onClick={() => { setFolderError(''); setFolderOpen(true); }}>选择文件夹</button>}</div>
+          <div className="empty-state"><span>＋</span><h2>添加第一个媒体文件夹</h2><p>电脑上的文件不会离开当前局域网。</p>{server?.canPickLocalFolder && <button className="add-button" onClick={() => setFolderOpen(true)}>选择文件夹</button>}</div>
         )}
 
         <div className="section-title" id="recent"><div><h2>{filter === 'all' ? '最近添加' : filter === 'video' ? '视频' : filter === 'audio' ? '音频' : '最近播放'}</h2><span>{filtered.length} 个项目</span></div><button onClick={() => setFilter('all')}>查看全部 →</button></div>
@@ -699,17 +673,11 @@ export function MediaLibraryView() {
         )}
       </section>
 
-      {folderOpen && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setFolderOpen(false); }}>
-          <form className="folder-modal" onSubmit={addFolder}>
-            <p className="eyebrow">COMPUTER LIBRARY</p><h2>添加媒体文件夹</h2><p>从电脑中选择文件夹，Localis 会递归扫描其中的视频与音频。</p>
-            {server?.nativeFolderPicker && <button className="native-folder-button" type="button" disabled={folderBusy} onClick={() => void pickFolder()}><span className="folder-icon large" aria-hidden="true" /><span><strong>{folderBusy ? '等待文件夹选择…' : '打开本地文件夹'}</strong><small>使用 Windows 原生选择窗口</small></span><i aria-hidden="true">›</i></button>}
-            <details className="manual-folder-entry"><summary>手动输入完整路径</summary><input autoFocus={!server?.nativeFolderPicker} aria-label="媒体文件夹路径" placeholder="D:\Videos" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} /></details>
-            {folderError && <div className="inline-error folder-error" role="alert">{folderError}</div>}
-            <div><button type="button" onClick={() => setFolderOpen(false)}>取消</button><button className="add-button" type="submit" disabled={!folderPath.trim() || folderBusy}>添加并扫描</button></div>
-          </form>
-        </div>
-      )}
+      <FolderBrowserModal
+        open={folderOpen}
+        onOpenChange={setFolderOpen}
+        onSelectFolder={addLocalFolder}
+      />
 
       {cloudOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCloudOpen(false); }}>

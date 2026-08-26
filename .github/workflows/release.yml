@@ -1,0 +1,276 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-release:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      LOCALIS_COMMIT_SHA: ${{ github.sha }}
+      LOCALIS_BUILD_CHANNEL: release
+      LOCALIS_RUN_AI_INTEGRATION: "0"
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag against package version
+        id: release_metadata
+        shell: pwsh
+        run: |
+          $package = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
+          $version = [string]$package.version
+          $expectedTag = "v$version"
+          if ($env:GITHUB_REF_TYPE -ne 'tag') {
+            throw "Release workflow requires a tag ref, got '$($env:GITHUB_REF_TYPE)'."
+          }
+          if ($env:GITHUB_REF_NAME -cne $expectedTag) {
+            throw "Tag '$($env:GITHUB_REF_NAME)' does not match package version '$version' (expected '$expectedTag')."
+          }
+          $tagsAtHead = @(git tag --points-at HEAD)
+          if ($tagsAtHead -notcontains $expectedTag) {
+            throw "Checked-out commit is not pointed to by '$expectedTag'."
+          }
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag '$expectedTag' must point to a commit contained in origin/main."
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tag=$expectedTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Expose bundled FFmpeg and ffprobe
+        shell: pwsh
+        run: |
+          $ffmpeg = node -p "require('ffmpeg-static')"
+          $ffprobe = node -p "require('ffprobe-static').path"
+          if (!(Test-Path -LiteralPath $ffmpeg) -or !(Test-Path -LiteralPath $ffprobe)) {
+            throw 'Bundled FFmpeg or ffprobe is missing after npm ci.'
+          }
+          "FFMPEG_PATH=$ffmpeg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFPROBE_PATH=$ffprobe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LOCALIS_OUTPUT_PROBE_PATH=$ffprobe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          (Split-Path -Parent $ffmpeg) | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          (Split-Path -Parent $ffprobe) | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Run hardware-independent unit and integration suite
+        run: npm test
+
+      - name: Package Windows installer and portable executable
+        run: npm run package:win
+
+      - name: Verify packaged build metadata
+        run: npm run verify:build-metadata
+
+      - name: Verify workspace client and server build identity
+        run: npm run verify:build-artifacts
+
+      - name: Verify commit identity in packaged application payload
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.release_metadata.outputs.version }}
+        run: |
+          $releaseDirectory = Join-Path $PWD 'release'
+          $expectedPath = Join-Path $releaseDirectory 'win-unpacked/resources/app/desktop/build/build-metadata.json'
+          if (Test-Path -LiteralPath $expectedPath -PathType Leaf) {
+            $metadataFiles = @(Get-Item -LiteralPath $expectedPath)
+          } else {
+            $metadataFiles = @(
+              Get-ChildItem -LiteralPath $releaseDirectory -Recurse -File -Filter 'build-metadata.json' |
+                Where-Object { $_.FullName -match '[\\/]resources[\\/]app[\\/]desktop[\\/]build[\\/]build-metadata\.json$' }
+            )
+          }
+          if ($metadataFiles.Count -ne 1) {
+            throw "Expected exactly one packaged build-metadata.json, got $($metadataFiles.Count)."
+          }
+
+          $metadata = Get-Content -LiteralPath $metadataFiles[0].FullName -Raw | ConvertFrom-Json
+          $expectedCommit = $env:GITHUB_SHA.ToLowerInvariant()
+          if ([int]$metadata.schemaVersion -ne 1 -or [string]$metadata.buildId -notmatch '^[0-9a-f]{64}$') {
+            throw 'Packaged build identity schema is invalid.'
+          }
+          if ([string]$metadata.commitSha -cne $expectedCommit) {
+            throw "Packaged commit SHA does not match GITHUB_SHA."
+          }
+          if ([string]$metadata.commitShortSha -cne $expectedCommit.Substring(0, 12)) {
+            throw 'Packaged short commit SHA is inconsistent.'
+          }
+          if ([string]$metadata.version -cne $env:RELEASE_VERSION) {
+            throw 'Packaged version does not match package/tag version.'
+          }
+          if ([string]$metadata.channel -cne 'release') {
+            throw 'Packaged build channel is not release.'
+          }
+
+      - name: Verify packaged client and server build identity
+        run: npm run verify:build-artifacts -- release/win-unpacked/resources/app
+
+      - name: Smoke-test packaged desktop build identity
+        shell: pwsh
+        run: |
+          function Get-FreeTcpPort {
+            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+            $listener.Start()
+            try { return ([Net.IPEndPoint]$listener.LocalEndpoint).Port }
+            finally { $listener.Stop() }
+          }
+
+          $apiPort = Get-FreeTcpPort
+          do { $frontendPort = Get-FreeTcpPort } while ($frontendPort -eq $apiPort)
+          $appPath = Join-Path $PWD 'release/win-unpacked/Localis.exe'
+          $metadataPath = Join-Path $PWD 'release/win-unpacked/resources/app/desktop/build/build-metadata.json'
+          if (!(Test-Path -LiteralPath $appPath -PathType Leaf)) { throw 'Packaged Localis.exe is missing.' }
+          $expected = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+
+          $env:LOCALIS_HEADLESS = '1'
+          $env:LOCALIS_PORT = [string]$apiPort
+          $env:LOCALIS_FRONTEND_PORT = [string]$frontendPort
+          $env:LOCALIS_FRONTEND_ORIGIN = "http://127.0.0.1:$frontendPort"
+          $env:LOCALIS_MEDIA_DIRS = Join-Path $PWD 'sample-media'
+          $env:LOCALIS_DATA_DIR = Join-Path $env:RUNNER_TEMP 'localis-release-smoke'
+          $stdoutPath = Join-Path $env:RUNNER_TEMP 'localis-release-smoke.stdout.log'
+          $stderrPath = Join-Path $env:RUNNER_TEMP 'localis-release-smoke.stderr.log'
+          $desktop = Start-Process -FilePath $appPath -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(120)
+            $health = $null
+            while ([DateTime]::UtcNow -lt $deadline) {
+              if ($desktop.HasExited) { throw 'Packaged desktop exited before becoming ready.' }
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:$apiPort/api/health" -TimeoutSec 2
+                if ($health.ok) { break }
+              } catch {}
+              Start-Sleep -Milliseconds 500
+            }
+            if (!$health) { throw 'Packaged desktop did not become ready.' }
+            if (!$health.build.available -or [string]$health.build.metadata.buildId -cne [string]$expected.buildId) {
+              throw 'Packaged runtime build identity does not match its payload.'
+            }
+            if ([string]$health.build.metadata.commitSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
+              throw 'Packaged runtime commit SHA does not match GITHUB_SHA.'
+            }
+            $page = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$apiPort" -TimeoutSec 10
+            if ($page.StatusCode -ne 200 -or $page.Content -notmatch 'Localis') {
+              throw 'Packaged desktop web application smoke test failed.'
+            }
+          } finally {
+            if (!$desktop.HasExited) {
+              & taskkill /PID $desktop.Id /T /F *> $null
+              $taskkillExit = $LASTEXITCODE
+              $desktop.Refresh()
+              if ($taskkillExit -ne 0 -and !$desktop.HasExited) {
+                throw 'Unable to stop the packaged desktop smoke-test process tree.'
+              }
+            }
+            $global:LASTEXITCODE = 0
+          }
+
+      - name: Generate CycloneDX SBOM and checksums
+        id: assets
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.release_metadata.outputs.version }}
+        run: |
+          $releaseDirectory = Join-Path $PWD 'release'
+          $setup = Join-Path $releaseDirectory "Localis-Setup-$env:RELEASE_VERSION-x64.exe"
+          $portable = Join-Path $releaseDirectory "Localis-Portable-$env:RELEASE_VERSION-x64.exe"
+          foreach ($artifact in @($setup, $portable)) {
+            if (!(Test-Path -LiteralPath $artifact -PathType Leaf)) {
+              throw "Expected release artifact is missing: $artifact"
+            }
+            if ((Get-Item -LiteralPath $artifact).Length -le 0) {
+              throw "Release artifact is empty: $artifact"
+            }
+          }
+
+          $sbom = Join-Path $releaseDirectory "Localis-$env:RELEASE_VERSION-sbom.cdx.json"
+          npm sbom --sbom-format cyclonedx | Out-File -LiteralPath $sbom -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) {
+            throw "npm sbom failed with exit code $LASTEXITCODE."
+          }
+          $sbomDocument = Get-Content -LiteralPath $sbom -Raw | ConvertFrom-Json
+          if ($sbomDocument.bomFormat -ne 'CycloneDX') {
+            throw 'Generated SBOM is not a CycloneDX document.'
+          }
+
+          $checksum = Join-Path $releaseDirectory 'SHA256SUMS.txt'
+          $hashedAssets = @($setup, $portable, $sbom)
+          $checksumLines = $hashedAssets | Sort-Object | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($_))"
+          }
+          $checksumText = ($checksumLines -join "`n") + "`n"
+          [IO.File]::WriteAllText($checksum, $checksumText, [Text.UTF8Encoding]::new($false))
+
+          $assetPaths = @($setup, $portable, $sbom, $checksum)
+          "asset_paths=$($assetPaths -join '|')" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_metadata.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release_metadata.outputs.version }}
+          RELEASE_ASSET_PATHS: ${{ steps.assets.outputs.asset_paths }}
+        run: |
+          $assetPaths = @($env:RELEASE_ASSET_PATHS -split '\|' | Where-Object { $_ })
+          if ($assetPaths.Count -ne 4) {
+            throw "Expected four release assets, got $($assetPaths.Count)."
+          }
+
+          & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release '$env:RELEASE_TAG' already exists; published assets are immutable."
+          }
+
+          $releaseNotesPath = Join-Path $PWD "docs/releases/$env:RELEASE_TAG.md"
+          $notesArguments = if (Test-Path -LiteralPath $releaseNotesPath -PathType Leaf) {
+            @('--notes-file', $releaseNotesPath)
+          } else {
+            @('--generate-notes')
+          }
+
+          $ghArguments = @(
+            'release', 'create', $env:RELEASE_TAG,
+            '--repo', $env:GITHUB_REPOSITORY,
+            '--verify-tag',
+            '--target', $env:GITHUB_SHA,
+            '--title', "Localis $env:RELEASE_VERSION"
+          ) + $notesArguments + $assetPaths
+
+          & gh @ghArguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release publication failed with exit code $LASTEXITCODE."
+          }
