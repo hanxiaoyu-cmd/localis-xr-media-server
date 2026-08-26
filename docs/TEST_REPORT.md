@@ -131,6 +131,6 @@ AI SR: 1280x720 -> 2560x1440, 1-second segments, Real-ESRGAN NCNN Vulkan
 
 ## Windows 发布产物
 
-v0.4.0 的安装版与便携版由标签触发的 Windows Release 工作流从对应提交重新构建，并同时发布 CycloneDX SBOM 与 `SHA256SUMS.txt`。安装包内的 Web、媒体服务、Electron 载荷和诊断文件必须具有相同 commit SHA 与 `buildId`；工作流还会无界面启动打包后的 EXE 并校验 `/api/health` 身份。
+v0.4.1 的安装版与便携版由标签触发的 Windows Release 工作流从对应提交重新构建，并同时发布 CycloneDX SBOM 与 `SHA256SUMS.txt`。安装包内的 Web、媒体服务、Electron 载荷和诊断文件必须具有相同 commit SHA 与 `buildId`；工作流还会无界面启动打包后的 EXE 并校验 `/api/health` 身份。`v0.4.0` 标签的首次工作流因 electron-builder 标签隐式发布需要额外 Token 而中止，没有创建 GitHub Release；v0.4.1 已显式禁用该隐式行为。
 
-最终文件大小和 SHA-256 以 [GitHub Releases](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) 中不可覆盖的 v0.4.0 资产为准，不再在源码文档中复制可能过期的本地构建哈希。当前流程尚未声明安装器逐字节可复现，也尚未提供商业代码签名。
+最终文件大小和 SHA-256 以 [GitHub Releases](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) 中不可覆盖的 v0.4.1 资产为准，不再在源码文档中复制可能过期的本地构建哈希。当前流程尚未声明安装器逐字节可复现，也尚未提供商业代码签名。
