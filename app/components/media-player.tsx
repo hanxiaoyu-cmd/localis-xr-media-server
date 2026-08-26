@@ -5,6 +5,8 @@ import Hls from 'hls.js';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { PlaybackProgress, PublicMediaItem } from '@/server/types';
 import type { ServerSuperResolutionLevel, ServerSuperResolutionPlan } from '@/server/super-resolution';
+import type { BuildMetadataReadResult } from '@/server/build-metadata';
+import { buildReloadKey, clientBuildMetadata, compareBuildMetadata } from '@/app/lib/client-build-metadata';
 import { XrVideoStage, type XrDiagnostics, type XrVideoOptions } from '@/app/lib/xr-video-stage';
 import { chooseHlsTransport } from '@/app/lib/hls-transport';
 import { savedServerSuperResolution } from '@/app/lib/server-super-resolution-preference';
@@ -70,6 +72,7 @@ interface MediaResponse {
   item: PublicMediaItem;
   progress?: PlaybackProgress;
   transcode: TranscodeStatus;
+  build?: BuildMetadataReadResult;
 }
 
 async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -274,6 +277,16 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
       setDirectPlaybackFailed(false);
       setXrOriginalSampleReady(false);
       const response = await getJson<MediaResponse>(`/api/media/${mediaId}`);
+      const buildCompatibility = compareBuildMetadata(clientBuildMetadata, response.build);
+      if (buildCompatibility === 'mismatch' && clientBuildMetadata) {
+        const reloadKey = buildReloadKey(clientBuildMetadata, response.build);
+        if (window.sessionStorage.getItem(reloadKey) !== 'attempted') {
+          window.sessionStorage.setItem(reloadKey, 'attempted');
+          window.location.reload();
+          return;
+        }
+        throw new Error('页面与媒体服务来自不同构建。请重新启动 Localis 后刷新页面。');
+      }
       let currentDisplayProfile: DisplayProfileState | undefined;
       try {
         const userAgentData = navigator as Navigator & { userAgentData?: { platform?: string } };
@@ -768,6 +781,9 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
       clientCapability,
       forcedServerCompatibility: hlsPlayback?.forceCompatibility,
       serverSuperResolution: superResolution,
+      clientBuild: clientBuildMetadata,
+      serverBuild: data?.build,
+      buildCompatibility: compareBuildMetadata(clientBuildMetadata, data?.build),
       item: data?.item,
       transcode: serverEnhancement ?? data?.transcode,
       video: video ? {
@@ -1019,6 +1035,7 @@ export function MediaPlayer({ mediaId }: { mediaId: string }) {
         <div><span>编码</span><strong>{[item.videoCodec, item.audioCodec].filter(Boolean).join(' / ') || '云端文件待检测'}</strong></div>
         <div><span>色彩</span><strong>{item.kind === 'video' ? dynamicRangeLabel(item) : '—'}</strong></div>
         <div><span>XR 安全环境</span><strong>{diagnostics?.secureContext ? '是' : '否'}</strong></div>
+        <div><span>构建</span><strong>{data.build?.available ? `${data.build.metadata.version} · ${data.build.metadata.commitShortSha}${data.build.metadata.dirty ? ' · dirty' : ''}` : '身份不可用'}</strong></div>
         <div><span>设备端超分</span><strong>已禁用</strong></div>
         <div><span>丢帧</span><strong>{diagnostics?.droppedFrames ?? '播放后检测'}{diagnostics?.totalFrames ? ` / ${diagnostics.totalFrames}` : ''}</strong></div>
         <div><span>电脑端超分</span><strong>{superResolution === 'off' ? '关闭' : serverEnhancement?.plan.outputWidth ? `${serverEnhancement.plan.sourceWidth}×${serverEnhancement.plan.sourceHeight} → ${serverEnhancement.plan.outputWidth}×${serverEnhancement.plan.outputHeight} · ${serverEnhancement.enhancementBackend || serverEnhancement.encoder}` : `${superResolutionLabel(superResolution)} · 准备中`}</strong></div>

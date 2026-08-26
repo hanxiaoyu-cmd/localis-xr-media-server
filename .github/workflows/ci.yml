@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-verification:
+    name: Windows verification
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      LOCALIS_COMMIT_SHA: ${{ github.sha }}
+      LOCALIS_BUILD_CHANNEL: ci
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Expose bundled FFmpeg and ffprobe
+        shell: pwsh
+        run: |
+          $ffmpeg = node -p "require('ffmpeg-static')"
+          $ffprobe = node -p "require('ffprobe-static').path"
+          if (!(Test-Path -LiteralPath $ffmpeg) -or !(Test-Path -LiteralPath $ffprobe)) {
+            throw 'Bundled FFmpeg or ffprobe is missing after npm ci.'
+          }
+          "FFMPEG_PATH=$ffmpeg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFPROBE_PATH=$ffprobe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          (Split-Path -Parent $ffmpeg) | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          (Split-Path -Parent $ffprobe) | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Run unit and integration tests
+        run: npm test
+
+      - name: Build production web application
+        run: npm run build
+
+      - name: Build desktop server bundle
+        run: npm run build:desktop-server
+
+      - name: Verify embedded build metadata
+        run: npm run verify:build-metadata
+
+      - name: Verify client and server build identity
+        run: npm run verify:build-artifacts

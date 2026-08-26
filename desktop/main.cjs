@@ -24,6 +24,19 @@ function rootDir() {
   return app.isPackaged ? app.getAppPath() : path.resolve(__dirname, '..');
 }
 
+function embeddedBuildMetadata() {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(rootDir(), 'desktop', 'build', 'build-metadata.json'), 'utf8'));
+    const buildId = value.schemaVersion === 1 && typeof value.buildId === 'string' && /^[0-9a-f]{64}$/.test(value.buildId);
+    const fullSha = typeof value.commitSha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value.commitSha);
+    const shortSha = typeof value.commitShortSha === 'string' && value.commitShortSha === value.commitSha.slice(0, 12);
+    if (!buildId || typeof value.version !== 'string' || !fullSha || !shortSha || typeof value.buildTime !== 'string') return undefined;
+    return value;
+  } catch {
+    return undefined;
+  }
+}
+
 function executablePath(value) {
   return value.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
 }
@@ -150,9 +163,16 @@ async function waitForReady(timeoutMs = 120_000) {
 
 async function startLocalis() {
   const root = rootDir();
+  const build = embeddedBuildMetadata();
+  if (!build) throw new Error('构建身份缺失或无效，请重新安装 Localis。');
+  if (build.version !== app.getVersion()) throw new Error('应用版本与构建身份不一致，请重新安装 Localis。');
+  appendLog('desktop', `构建身份：id=${build.buildId} version=${build.version} commit=${build.commitSha} time=${build.buildTime} channel=${build.channel}`);
   spawnNode('web', path.join(root, 'desktop', 'frontend-server.mjs'));
   spawnNode('server', path.join(root, 'desktop', 'build', 'server.mjs'));
   const health = await waitForReady();
+  if (!health.build?.available || health.build.metadata?.buildId !== build.buildId) {
+    throw new Error('桌面程序与媒体服务的构建身份不一致，请重新安装 Localis。');
+  }
   appendLog('desktop', `Localis 就绪：${JSON.stringify(health)}`);
   process.stdout.write(`LOCALIS_DESKTOP_READY ${localUrl}\n`);
   if (process.env.LOCALIS_HEADLESS !== '1') await mainWindow.loadURL(localUrl);

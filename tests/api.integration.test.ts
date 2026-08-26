@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApiApp, type AppDependencies } from '../server/app';
+import { createBuildMetadata } from '../server/build-metadata';
 import { PairingAuth } from '../server/auth';
 import { MediaLibrary } from '../server/media-library';
 import { FolderPickerBusyError } from '../server/folder-picker';
@@ -62,6 +63,31 @@ afterAll(async () => {
 });
 
 describe('Localis API', () => {
+  it('publishes one verified build identity through health, server and player diagnostics data', async () => {
+    const metadata = createBuildMetadata({
+      version: '0.3.0',
+      commitSha: '0123456789abcdef0123456789abcdef01234567',
+      buildTime: '2026-08-26T01:02:03.000Z',
+      dirty: false,
+      channel: 'test',
+    });
+    const buildMetadata = {
+      available: true,
+      status: 'available',
+      metadata,
+    } as const;
+    const identifiedApi = createApiApp({ ...deps, buildMetadata });
+    const item = deps.library.list()[0];
+
+    const health = await host(request(identifiedApi).get('/api/health')).expect(200);
+    const server = await host(request(identifiedApi).get('/api/server')).expect(200);
+    const media = await host(request(identifiedApi).get(`/api/media/${item.id}`)).expect(200);
+
+    expect(health.body.build).toEqual(buildMetadata);
+    expect(server.body.build).toEqual(buildMetadata);
+    expect(media.body.build).toEqual(buildMetadata);
+  });
+
   it('exposes the ephemeral pairing code only to the computer loopback status endpoint', async () => {
     const response = await host(request(api).get('/api/pair/status')).expect(200);
     expect(response.body).toMatchObject({ paired: true, pairingRequired: false });

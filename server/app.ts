@@ -15,6 +15,7 @@ import { SourceChangedError, TranscodeCapacityError, TranscodeManager, type Tran
 import { parseServerSuperResolutionLevel, SERVER_SUPER_RESOLUTION_LEVELS, ServerSuperResolutionUnavailableError } from './super-resolution';
 import { CloudSourceError, CloudSourceManager } from './cloud-source-manager';
 import { QuarkConnectorError, QuarkDesktopConnector } from './quark-desktop-connector';
+import { getBuildMetadata, type BuildMetadataReadResult } from './build-metadata';
 import type { LocalisConfig } from './types';
 
 export interface AppDependencies {
@@ -26,6 +27,7 @@ export interface AppDependencies {
   clouds?: CloudSourceManager;
   quark?: QuarkDesktopConnector;
   pickDirectory?: () => Promise<string | undefined>;
+  buildMetadata?: BuildMetadataReadResult | Promise<BuildMetadataReadResult>;
 }
 
 const mediaTypes: Record<string, string> = {
@@ -107,6 +109,7 @@ async function sendFileWithRange(req: Request, res: Response, filePath: string, 
 
 export function createApiApp(deps: AppDependencies) {
   const { config, library, auth, progress, transcodes, clouds, quark } = deps;
+  const buildMetadata = Promise.resolve(deps.buildMetadata ?? getBuildMetadata());
   const selectDirectory = deps.pickDirectory ?? (() => pickLocalDirectory(config.mediaDirs[0]));
   const app = express();
   app.disable('x-powered-by');
@@ -143,10 +146,12 @@ export function createApiApp(deps: AppDependencies) {
     next();
   });
 
-  app.get('/api/health', (_req, res) => {
+  app.get('/api/health', async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
     res.json({
       ok: true,
       service: 'localis',
+      build: await buildMetadata,
       mediaCount: library.items.size,
       encoder: transcodes.encoder,
       aiSuperResolution: {
@@ -168,11 +173,13 @@ export function createApiApp(deps: AppDependencies) {
 
   app.use('/api', auth.middleware);
 
-  app.get('/api/server', (req, res) => {
+  app.get('/api/server', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
     const protocol = req.secure ? 'https' : 'http';
     const lanAddresses = getLanAddresses();
     res.json({
       name: 'Localis',
+      build: await buildMetadata,
       secure: req.secure,
       secureContextRequiredForWebXR: true,
       host: safeHost(req),
@@ -361,10 +368,16 @@ export function createApiApp(deps: AppDependencies) {
     try { res.json(requireQuark().cancelDownload(String(req.params.id))); } catch (error) { next(error); }
   });
 
-  app.get('/api/media/:id', (req, res) => {
+  app.get('/api/media/:id', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
     const item = library.list().find((candidate) => candidate.id === req.params.id);
     if (!item) return res.status(404).json({ error: 'media_not_found' });
-    res.json({ item, progress: progress.get(item.id), transcode: transcodes.statusForItem(library.get(item.id)!) });
+    res.json({
+      item,
+      progress: progress.get(item.id),
+      transcode: transcodes.statusForItem(library.get(item.id)!),
+      build: await buildMetadata,
+    });
   });
   app.patch('/api/media/:id', async (req, res, next) => {
     try {
