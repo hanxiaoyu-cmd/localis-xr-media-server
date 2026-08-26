@@ -1,8 +1,8 @@
 {
   "name": "localis-xr-media-server",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "No-app LAN media server for Vision Pro, Quest and PICO.",
+  "description": "Private, zero-install XR media gateway with local AI enhancement and cloud-drive access.",
   "author": "Localis contributors",
   "main": "desktop/main.cjs",
   "engines": {

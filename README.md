@@ -1,143 +1,246 @@
 <div align="center">
-  <img src="./docs/assets/readme-hero.png" alt="Localis 将电脑上的私人媒体通过局域网送到空间计算头显" width="100%" />
+  <img src="./docs/assets/readme-hero.png" alt="Localis 私有 XR 媒体网关" width="100%" />
 
   <br />
 
   # Localis
 
-  **你的媒体留在电脑上。头显只需要一个网址。**
+  ### 你的媒体，留在你的电脑。空间播放，只需要一个网址。
 
-  Localis 是运行在 Windows 电脑上的私人局域网影院。Vision Pro、Quest、PICO 和手机无需安装 App，使用系统浏览器打开电脑显示的局域网地址，即可播放本地视频、音频、VR180、VR360 与 WebXR 内容。
+  **头显零安装 · 私有化运行 · 本地 AI 增强 · 网盘接入**
 
-  [下载 Windows 版](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) · [查看测试报告](./docs/TEST_REPORT.md) · [后续路线图](./docs/ROADMAP.md) · [头显验收清单](./docs/HEADSET_ACCEPTANCE.md) · [P1 HDR / 10-bit 验收](./docs/P1_HDR_DEVICE_PROFILE_ACCEPTANCE.md)
+  Localis 是运行在 Windows 电脑上的 XR 媒体网关。它把本地影片与网盘内容整理、转换并通过当前局域网送到系统浏览器，让 Vision Pro、Quest、PICO、手机和平板无需安装 Localis 客户端即可访问私人媒体库。
 
   <br />
 
-  ![Windows 11](https://img.shields.io/badge/Windows_11-tested-B8FF5C?style=flat-square&labelColor=111311&color=B8FF5C)
-  ![Vision Pro](https://img.shields.io/badge/Vision_Pro-zero_install-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
-  ![WebXR](https://img.shields.io/badge/WebXR-VR180_%2F_360-B8FF5C?style=flat-square&labelColor=111311&color=B8FF5C)
-  ![Tests](https://img.shields.io/badge/tests-263_passing-F4F2EE?style=flat-square&labelColor=111311&color=F4F2EE)
+  [下载最新版](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) · [文档中心](./docs/README.md) · [测试报告](./docs/TEST_REPORT.md) · [路线图](./docs/ROADMAP.md)
+
+  <br />
+
+  [![Windows verification](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/ci.yml/badge.svg)](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/ci.yml)
+  [![Latest release](https://img.shields.io/github/v/release/hanxiaoyu-cmd/localis-xr-media-server?display_name=tag&style=flat-square&label=release&color=111111)](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest)
+  ![Windows x64](https://img.shields.io/badge/Windows-x64-111111?style=flat-square)
+  ![Private LAN](https://img.shields.io/badge/network-private_LAN-B8FF5C?style=flat-square&labelColor=111111&color=B8FF5C)
 </div>
 
 ---
 
-## 不给头显再装一个播放器
+## One computer. Every spatial screen.
 
-Localis 的设计原则只有一句：**所有管理与计算都在电脑上完成，头显只负责访问网页和播放最终视频。**
+Localis 把复杂的事情留给电脑：媒体扫描、格式判断、FFmpeg 转码、Real-ESRGAN 增强、网盘授权与缓存都发生在 Windows 主机。播放端只打开网页，接收最终可播放的媒体流。
 
-产品定位固定为：**零安装、私有化、带 AI 增强和网盘接入的 XR 媒体网关。** 新功能应优先增强电脑端媒体兼容与交付能力，不要求头显安装 Localis 客户端，不把私人文件、网盘凭据或 AI 计算迁移到第三方云端。
+> “零安装”指 Vision Pro、Quest、PICO 等播放端无需安装 Localis App、扩展或 AI 运行时。作为网关的 Windows 电脑仍需运行安装版或便携版 Localis。
 
 ```mermaid
 flowchart LR
-  A[电脑本地文件夹] --> C[Localis for Windows]
-  B[百度网盘 / 夸克网盘] --> C
-  C --> D[Range 原文件直放]
-  C --> E[电脑端 FFmpeg / Real-ESRGAN 转码与超分]
-  D --> F[当前局域网]
-  E --> F
-  F --> G[Vision Pro Safari]
-  F --> H[Quest / PICO 浏览器]
-  F --> I[手机 / 平板浏览器]
+  A[本地媒体文件夹] --> C[Localis for Windows]
+  B[百度 / 夸克 / 本机 WebDAV] --> C
+  C --> D[Range 原文件]
+  C --> E[兼容 HLS]
+  C --> F[电脑端超分 / AI]
+  D --> G[Private LAN]
+  E --> G
+  F --> G
+  G --> H[系统浏览器]
+  H --> I[平面视频 / VR180 / VR360 / WebXR]
 ```
 
-- 视频文件、网盘凭据、转码缓存和 TLS 私钥全部留在电脑。
-- 头显不安装 Localis App，不运行超分算法，也不接收网盘登录凭据。
-- 浏览器能直接解码的文件走 HTTP Range；其余内容由电脑按需生成 H.264/AAC HLS。
-- 标准、高、极致使用可拖动的按需时间线，只生成当前播放位置附近的 4 秒分片；AI 清晰会先在电脑完整生成并缓存整部影片，达到 100% 后才开放播放。
-
-## 三步开始
-
-1. 从 [Releases](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) 下载 `Localis-Setup` 安装版，或 `Localis-Portable` 便携版。
-2. 在电脑上启动 Localis，并在 Windows 防火墙提示中允许“专用网络”。点击“添加媒体文件夹”，选择影片目录。
-3. 让头显和电脑连接同一个局域网。在头显浏览器中打开 Localis 左侧显示的地址，再输入同一位置的六位配对码。
-
-> Windows 版已经内置 Node.js 运行时、FFmpeg、ffprobe、Real-ESRGAN NCNN Vulkan 与模型。普通用户不需要安装 Python、PyTorch、CUDA 或 Vulkan SDK。电脑仍需保留 Windows 正常工作的显卡驱动。当前安装包尚未购买代码签名证书，Windows SmartScreen 可能显示“未知发布者”；请只从本仓库 Release 下载并核对 SHA-256。
-
-## 为空间视频而做
-
-| 能力 | 实现 |
+| 原则 | Localis 的做法 |
 | --- | --- |
-| 本地媒体 | 递归扫描常见视频与音频；原生文件夹选择窗口；路径不发送到头显 |
-| 兼容播放 | MP4/WebM 等优先 Range 直放；MKV/TS/AVI/旧编码自动 remux 或转 H.264/AAC HLS |
-| HDR / 高位深双路径 | HDR10、HLG 默认在电脑端映射为 8-bit SDR；10/12-bit SDR 显式抖动降位深；杜比视界与未知色彩不猜测正确呈现，原文件保持不变并保留实验尝试入口 |
-| 电脑端超分 | 关闭、标准 1.25×、高 1.5×、极致 2×、AI 清晰 2×；所有计算只在电脑执行 |
-| 长片跳转 | 完整 VOD 时间线立即返回；用户跳到哪里，电脑优先生成哪里的分片并显示缓存进度 |
-| VR / WebXR | 平面、VR180、VR360、Mono、SBS、TB、LR/RL；头显内播放、暂停、跳转与字幕面板 |
-| 字幕 | 外挂 SRT/VTT/ASS/SSA 与内封文本字幕统一转换为 WebVTT |
-| 百度网盘 | 电脑端首次配置开发者应用身份；之后通过二维码登录，只读访问应用目录 |
-| 夸克网盘 | 电脑端安装官方组件、浏览器授权、搜索并完整下载到本地缓存后入库 |
-| 私人访问 | 六位配对码、HMAC 签名 HttpOnly Cookie、尝试限速、Host/Origin 校验与路径隐藏 |
+| 头显零安装 | 播放端只使用系统浏览器，不要求安装 Localis 客户端、模型或浏览器扩展 |
+| 数据私有 | 媒体、缓存、凭据、证书私钥与 AI 计算留在电脑，不经 Localis 公网中继 |
+| 可解释播放 | 页面显示实际使用的原片、兼容流、HDR→SDR、传统超分或 AI 路径 |
+| 安全回退 | 原片无法稳定解码时切换为电脑端 H.264/AAC HLS，不修改源文件 |
 
-“AI 清晰”使用随 EXE 携带的 Real-ESRGAN 通用视频模型，通过 NCNN Vulkan 在电脑显卡逐帧重建，再编码成标准 H.264 HLS；模型转换环境不随软件分发。为控制首段等待和临时空间，原生 4×模型接收映射到 1/2 尺寸的输入并直接产生 2×目标帧，0.5 降噪强度同时抑制压缩噪声。该档适合单目平面与 VR180；SBS/TB 和 VR360 暂使用传统档，后者会逐眼或环绕处理，避免眼间串色和经度接缝。Localis 的 AI 档不是 DLSS、RTX Video 或 FSR 的认证实现。
+## 三分钟开始
 
-## 电脑端控制台
+1. 从 [GitHub Releases](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) 下载 Windows x64 安装版或便携版。
+2. 启动 Localis。首次出现 Windows 防火墙提示时，只允许“专用网络”。
+3. 在电脑窗口点击“添加媒体文件夹”，用 Localis 内置文件夹窗口选择影片目录。
+4. 让播放设备与电脑连接同一局域网，打开界面显示的地址并输入六位配对码。
+5. 普通视频可通过局域网 HTTP 播放；需要进入 WebXR 时，再配置浏览器信任的 HTTPS。
 
-只有从 `localhost` 打开的电脑窗口能看到管理能力：
+### 选择发行包
 
-- 六位设备配对码与当前局域网地址。
-- 原生文件夹选择器、媒体库刷新和云盘登录。
-- 百度应用身份的一次性安全设置与二维码授权。
-- 夸克官方组件安装、授权、搜索、下载和缓存进度。
+| 文件 | 适合谁 | 行为 |
+| --- | --- | --- |
+| `Localis-Setup-<version>-x64.exe` | 日常使用 | 可选择安装目录，并创建开始菜单与桌面快捷方式 |
+| `Localis-Portable-<version>-x64.exe` | 试用或便携运行 | 不执行安装流程，首次启动会先解压自身 |
+| `SHA256SUMS.txt` | 所有人 | 用于核对安装包与 SBOM 的 SHA-256 |
+| `Localis-<version>-sbom.cdx.json` | 审计与发布 | CycloneDX 软件物料清单 |
 
-从局域网地址访问的头显与手机只能浏览、配对和播放，无法打开本地文件夹选择器、云盘管理接口或读取配对码。
+Windows 包已携带 Electron/Node.js 运行时、FFmpeg、ffprobe、Real-ESRGAN NCNN Vulkan 运行时和模型。普通用户不需要安装 Python、PyTorch、CUDA 或 Vulkan SDK；AI 清晰仍需要兼容 Vulkan 的显卡与正常驱动。
 
-## 播放策略
+当前安装包没有商业代码签名，SmartScreen 可能显示“未知发布者”。请只从本仓库 Release 下载，并使用同一 Release 中的 `SHA256SUMS.txt` 校验文件。
 
-| 输入 | 默认路径 |
+## 影像能力
+
+### 播放管线
+
+| 输入或选择 | 实际路径 |
 | --- | --- |
-| 浏览器可解码的 MP4/WebM/音频，且超分关闭 | Range 原文件直放 |
-| H.264/AAC 位于 MKV/TS 等容器 | fMP4 HLS remux，不重新编码视频 |
-| H.264 + 不兼容音频 | 复制视频，只转 AAC 音频 |
-| MPEG-4 Part 2、VC-1 等不兼容视频 | H.264/AAC HLS |
-| HDR10、HLG + 兼容流 | 电脑端 Hable 色调映射、抖动降为 8-bit SDR BT.709 H.264；不声称保留 HDR 输出 |
-| 杜比视界 / 色彩元数据未知 | 仅在基底传递函数明确时尝试映射；否则输出色彩未知的 8-bit H.264，不声称亮度或色彩正确 |
-| 任意视频 + 标准/高/极致超分 | 电脑端按需缩放、锐化与 H.264/AAC MPEG-TS VOD HLS |
-| 单目平面/VR180 + AI 清晰 | 电脑端 Real-ESRGAN 完整预处理；全部 4 秒分片完成后一次性开放 H.264/AAC HLS |
-| SRT/VTT/ASS/SSA 文本字幕 | WebVTT |
+| 浏览器安全范围内的 H.264 8-bit MP4/M4V/MOV，增强关闭 | HTTP Range 原文件直连 |
+| H.264/AAC 位于 MKV、TS 等容器 | fMP4 HLS remux，尽量不重新编码视频 |
+| H.264 搭配浏览器不稳定音轨 | 保留视频，只把音频转换为 AAC |
+| HEVC Main/Main10 或 H.264 High10 | 浏览器解码与显示证据充分时允许原片实验尝试，否则生成 H.264/AAC 兼容流 |
+| VC-1、MPEG-4 Part 2 或其他浏览器不安全编码 | 电脑端生成 H.264/AAC 兼容流 |
+| HDR10 / HLG | 默认在电脑端映射为 8-bit SDR BT.709；不把兼容流标记为 HDR 输出 |
+| 10/12-bit SDR | 使用抖动降为 8-bit 兼容流；转换有损 |
+| Dolby Vision / 色彩元数据未知 | 不重建 Dolby Vision 动态元数据；提供保守兼容路径，不保证亮度或色彩正确 |
+| 标准 / 高 / 极致 | 电脑端最高约 1.25× / 1.5× / 2× 空间缩放与锐化，按播放位置生成 HLS 分片 |
+| AI 清晰 | Real-ESRGAN NCNN Vulkan 最高 2×；完整预处理并缓存整片后才开放播放 |
 
-DRM、加密光盘、蓝光菜单、PGS/VobSub OCR 与专有加密容器不在当前范围。4K/6K/8K、HDR 和极致超分的效果取决于电脑编码能力、Wi-Fi 吞吐与头显解码器。
+传统超分遵循“绝不偷偷缩小”：片源已达到档位预算时保持原尺寸并仅做安全锐化；超过 H.264 Level 5.2 安全范围时拒绝该增强档。AI 清晰目前只用于单目平面或单目 VR180；SBS、TB 与 VR360 请使用标准、高或极致，避免眼间串色与环绕接缝。
+
+### XR、字幕与长片
+
+- 平面、VR180、VR360，以及 Mono、SBS、TB、LR/RL 和水平朝向校正。
+- WebXR 内提供播放、暂停、前后跳转和退出控制。
+- 外挂 SRT/VTT/ASS/SSA 与内封文本字幕统一输出为 WebVTT。
+- 传统增强流立即提供完整 VOD 时间线；拖到长片后段时，电脑优先生成目标位置附近的 4 秒分片。
+- Apple Safari 使用原生 HLS；Quest、PICO 与桌面 Chromium 优先使用 hls.js/MediaSource，并保留能力回退。
+- 播放器可导出包含构建身份、媒体能力判断、实际播放路径、视频状态与 WebXR 状态的诊断 JSON。
+
+### 当前验证边界
+
+Windows 桌面端、真实 FFmpeg/ffprobe 输出、浏览器播放页面和自动化安全边界已有可复查记录，详见 [实际测试报告](./docs/TEST_REPORT.md)。当前没有把 Vision Pro、Quest、PICO 的系统浏览器、HDR 观感、控制器行为或 90 分钟稳定性虚假标记为真机通过。
+
+因此，准确表述是：
+
+- Localis **面向** Vision Pro、Quest 与 PICO 的系统浏览器设计。
+- WebXR、VR180/360 和兼容流代码路径已经实现并接受自动化与桌面浏览器验证。
+- 三类头显的正式兼容声明仍需完成 [真机验收清单](./docs/HEADSET_ACCEPTANCE.md)。
+- “浏览器能解码”不等于端到端 HDR、Dolby Vision 或空间音频已经验证。
+
+DRM、商业流媒体解密、加密光盘、蓝光菜单、PGS/VobSub OCR 和专有加密容器不在当前范围。
+
+## 网盘接入
+
+网盘管理只出现在运行 Localis 的电脑窗口。头显不会看到登录入口、上游 URL、文件 ID、Token 或密码；云端源文件需要兼容处理时，会先完整缓存到电脑，再进入与本地文件相同的播放管线。
+
+| 接入 | 当前实现 | 证据边界 |
+| --- | --- | --- |
+| 百度网盘 | 用户在电脑端配置自己的开放平台应用身份，通过设备码二维码授权，只读访问应用目录 | 协议与安全边界已测试；真实账号完整闭环仍待验收 |
+| 夸克网盘 | 用户明确操作后，从官方仓库安装电脑端组件，在电脑浏览器授权、搜索并完整下载 | 官方组件安装与未登录状态已实机探测；真实账号闭环仍待验收 |
+| 本机 WebDAV / OpenList | 高级兼容入口，只接受 `localhost`/`127.0.0.1` 的只读桥接 | 本机 mock 协议、Range、缓存与凭据加密已测试 |
+
+第三方服务的账号状态、限速、API 政策与可用性不由 Localis 保证。真实账号测试要求见 [头显与云盘验收清单](./docs/HEADSET_ACCEPTANCE.md)。
 
 ## WebXR 与 HTTPS
 
-普通局域网 HTTP 可以完成视频和音频播放，但浏览器只在安全上下文开放 WebXR。要同时满足“头显零安装证书”和“局域网 WebXR”，需要自己控制的公共域名、公共可信通配符证书，以及只在家庭 LAN 内把该域名解析到电脑私有 IP。
+浏览器只在安全上下文开放 WebXR：
 
-Localis 提供 Cloudflare DNS-01 证书脚本；媒体仍直接走局域网，不经过 Cloudflare 或其他云服务器。完整配置见 [.env.example](./.env.example)。部分路由器会拦截公共域名返回私有 IP，需要关闭 DNS rebinding protection 或加入私人域名白名单。
+- `http://localhost` 可用于运行 Localis 的电脑本机开发与测试。
+- `http://192.168.x.x:8080` 可以播放普通视频，但大多数头显浏览器会禁用 WebXR。
+- 头显进入 WebXR 应使用公共 CA 签发、浏览器直接信任的 HTTPS 域名。
 
-## 从源码开发
+Localis 当前提供 Cloudflare DNS-01 辅助脚本。它创建指向电脑私有 LAN IP 的 DNS 记录并签发通配符证书；DNS 与证书验证使用 Cloudflare，媒体字节仍由播放设备直接从局域网电脑读取，不经过 Cloudflare Tunnel、CDN 或公网媒体中继。
 
-要求：Windows 11、Node.js 22.13+、FFmpeg/ffprobe 位于 `PATH`。仓库源码模式不会自动使用桌面安装包内的 FFmpeg；Windows 仓库包含用于测试与打包的 AI 运行时。
+域名可以在阿里云或其他注册商购买，但当前脚本要求该域名的权威 DNS 已托管到 Cloudflare。Cloudflare API Token 只需要目标 Zone 的 DNS 编辑权限，不要使用全局 API Key。
+
+在 PowerShell 中临时设置变量：
 
 ```powershell
-npm install
+$env:LOCALIS_BASE_DOMAIN = "lan.example.com"
+$env:CLOUDFLARE_ZONE_ID = "your-zone-id"
+$env:CLOUDFLARE_API_TOKEN = "zone-scoped-dns-edit-token"
+$env:ACME_EMAIL = "you@example.com"
+$env:LOCALIS_LAN_IP = "192.168.1.20" # 可选；默认自动探测
+
+npm run tls:provision
+```
+
+脚本完成后重启 Localis，并在头显中打开脚本输出的 `https://<hostname>:8080`。如果域名能解析却无法访问，请依次检查 Windows 专用网络防火墙、设备是否在同一 LAN、路由器 AP isolation，以及 DNS rebinding protection；部分路由器需要将该私人域名加入白名单。
+
+当前 HTTPS 流程仍是源码仓库中的运维工具，尚未做成桌面图形向导。证书续期前或电脑 LAN IP 改变后应再次运行 `npm run tls:provision`。完整变量说明见 [.env.example](./.env.example)。
+
+## 从源码运行
+
+### 环境
+
+- Windows 11
+- Node.js `22.13.0` 或更高版本
+- FFmpeg 与 ffprobe 位于 `PATH`，或设置 `FFMPEG_PATH` / `FFPROBE_PATH`
+- 可选：兼容 Vulkan 的 GPU，用于真实 AI 清晰处理
+
+### 开发模式
+
+```powershell
+git clone https://github.com/hanxiaoyu-cmd/localis-xr-media-server.git
+cd localis-xr-media-server
+npm ci
 npm run fixtures
 npm run local
 ```
 
-生产模式与 Windows 打包：
+默认入口：
+
+- 电脑管理页：`http://localhost:8080`
+- 局域网播放页：`http://<电脑局域网 IP>:8080`
+- `3210` 是只监听 `127.0.0.1` 的内部 Web 服务端口，不应对局域网开放。
+
+### 生产构建与桌面包
 
 ```powershell
+# Web 与媒体服务生产运行
 npm run build
 npm run start:local
 
-# 生成安装版和便携版 EXE
+# 构建并启动 Electron 桌面程序
+npm run desktop
+
+# 生成 Windows 安装版与便携版
 npm run package:win
 ```
 
-主要配置：
+### 常用配置
+
+Localis 直接读取进程环境变量；[.env.example](./.env.example) 是变量参考，不代表应用会自动加载任意 `.env` 文件。
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `LOCALIS_MEDIA_DIRS` | 自带测试媒体或空 | 一个或多个本地媒体根目录 |
-| `LOCALIS_PORT` | `8080` | 对局域网设备暴露的端口 |
-| `LOCALIS_MAX_TRANSCODES` | `2` | 同时进行的电脑端转码/超分任务 |
-| `LOCALIS_CACHE_GB` | `20` | HLS 缓存上限 |
-| `LOCALIS_CLOUD_CACHE_GB` | `50` | 云盘源文件缓存上限 |
-| `LOCALIS_ENCODER` | 实际探测 | 强制 `h264_nvenc`、`h264_mf` 或 `libx264` |
-| `LOCALIS_AI_SR_PATH` | Windows 包内置 | 源码调试时覆盖 Real-ESRGAN NCNN 可执行文件 |
-| `LOCALIS_AI_SR_MODELS_PATH` | Windows 包内置 | 源码调试时覆盖 NCNN 模型目录 |
-| `LOCALIS_PAIR_CODE` | 每次随机 | 固定六位配对码，仅调试使用 |
+| `LOCALIS_MEDIA_DIRS` | 已保存目录或示例媒体 | 一个或多个媒体根目录；Windows 使用分号分隔 |
+| `LOCALIS_DATA_DIR` | `%LOCALAPPDATA%\Localis` | 私有配置、凭据、证书与缓存根目录 |
+| `LOCALIS_PORT` | `8080` | 对电脑与局域网播放设备提供服务的端口 |
+| `LOCALIS_MAX_TRANSCODES` | `2` | 同时运行的转码/增强任务数 |
+| `LOCALIS_CACHE_GB` | `20` | HLS 与增强缓存上限 |
+| `LOCALIS_CLOUD_CACHE_GB` | `50` | 网盘完整源文件缓存上限 |
+| `LOCALIS_MAX_CLOUD_DOWNLOADS` | `1` | 并发网盘下载数，当前最多为 2 |
+| `LOCALIS_ENCODER` | 自动探测 | 强制 `h264_nvenc`、`h264_mf` 或 `libx264` |
+| `LOCALIS_PAIR_CODE` | 每次启动随机 | 固定六位配对码，仅建议调试使用 |
 
-其余 TLS、百度开发者身份、夸克运行时和安全参数见 [.env.example](./.env.example)。
+TLS、百度开放平台身份、AI 运行时覆盖路径与其他高级变量见 [.env.example](./.env.example)。不要把包含真实密钥的命令、终端历史或配置文件提交到 Git。
+
+## 诊断与故障定位
+
+Localis 为每次构建生成统一的 `buildId`、版本号与 commit SHA，并嵌入 Web、媒体服务、Electron 载荷与诊断信息。桌面端发现载荷混用时会拒绝继续启动，播放器发现页面与服务端身份不一致时只自动刷新一次，然后显示可操作错误。
+
+默认 HTTP 运行时可以检查健康状态：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8080/api/health
+```
+
+遇到播放问题时：
+
+1. 在播放器确认“当前影像链路”是否为原片、兼容 HLS、HDR→SDR 或增强路径。
+2. 点击“导出诊断”，记录 Localis 版本、设备/浏览器、源容器与编码、网络结构及复现步骤。
+3. 检查电脑剩余空间、GPU 驱动、防火墙和 FFmpeg 编码器状态。
+4. 启动失败时使用错误页显示的 `localis-desktop.log` 路径定位子进程错误。
+5. 提交报告前删除私人文件名、局域网地址、配对码以及任何账号或证书信息。
+
+当前自动化与实测细节统一记录在 [TEST_REPORT.md](./docs/TEST_REPORT.md)。
+
+## 隐私与安全
+
+- 六位配对码换取 HMAC 签名的 HttpOnly、SameSite Strict 会话 Cookie，并限制错误尝试频率。
+- 未识别 Host、跨 Origin 写请求和 HLS 路径穿越会被拒绝。
+- 媒体文件夹、文件夹浏览与云盘管理接口仅允许已配对的本机回环访问。
+- 百度与 WebDAV 凭据使用本机 AES-256-GCM 密钥加密保存；局域网播放 API 不返回上游凭据或绝对媒体路径。
+- Localis 面向可信家庭或工作室局域网。不要把 `8080` 端口直接暴露到公网。
+- 不要在 Issue、日志截图或诊断附件中公开 Cookie、Token、AppKey/SecretKey、证书私钥、配对码或媒体路径。
+
+安全问题请使用 GitHub 的 [私密漏洞报告](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/security/advisories/new)，不要先创建公开 Issue。详情见 [SECURITY.md](./SECURITY.md)。
 
 ## 质量门槛
 
@@ -146,20 +249,29 @@ npm run lint
 npm run typecheck
 npm test
 npm run build
+npm run build:desktop-server
+npm run verify:build-metadata
+npm run verify:build-artifacts
 ```
 
-自动化覆盖配对、Range、媒体扫描、字幕、原生文件夹选择、HLS 分流、完整时长 seek、电脑端五档超分、真实 Real-ESRGAN/FFmpeg 转码、SBS/TB 与 360°、云盘协议、容量保护和安全边界。生产页面还在真实 Chromium 中验证长电影远距离跳转与继续播放。
+Windows CI 在 Pull Request 与 `main` 上执行硬件无关验证；Tag Release 还会构建安装版/便携版、验证打包后的构建身份、执行无界面启动烟雾测试，并生成 CycloneDX SBOM 与 SHA-256。真实 Vulkan AI、真实头显、真实网盘账号和长时间 Wi-Fi 稳定性仍需独立验收。
 
-最新环境、逐项结果与没有被伪装成“真机已测”的边界，记录在 [实际测试报告](./docs/TEST_REPORT.md)。Vision Pro、Quest、PICO 的最终设备验收请按 [头显验收清单](./docs/HEADSET_ACCEPTANCE.md) 执行。
+发布机制与资产规则见 [RELEASE_PROCESS.md](./docs/RELEASE_PROCESS.md)。
 
-## 隐私、许可与贡献
+## 路线图
 
-- Localis 首版是只读媒体服务器，不上传、删除、移动或分享网盘文件。
-- 百度/夸克账号、Cookie、token、证书私钥和媒体路径不应出现在 Issue、日志截图或公开仓库中。
-- 当前 Localis 源码未采用开源许可证，保留所有权利；第三方组件仍各自遵循其许可证。
-- Windows 包含独立的 GPLv3 FFmpeg/ffprobe 以及 MIT/BSD-3-Clause Real-ESRGAN 运行时与模型，其来源和许可见 [第三方通知](./THIRD_PARTY_NOTICES.md)。
+下一阶段集中于可信 HTTPS 与三类头显真机矩阵、90 分钟长片/弱网测试、HDR 与高位深观感验收、真实百度/夸克账号闭环，以及桌面子进程恢复与诊断能力。
 
-提交问题前请阅读 [贡献指南](./CONTRIBUTING.md) 与 [安全策略](./SECURITY.md)。
+- [后续开发路线图](./docs/ROADMAP.md)
+- [头显与真实云盘验收](./docs/HEADSET_ACCEPTANCE.md)
+- [HDR / 10-bit 设备档案验收](./docs/P1_HDR_DEVICE_PROFILE_ACCEPTANCE.md)
+- [版本变更记录](./CHANGELOG.md)
+
+## 贡献与许可
+
+提交改动前请阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)，并保持产品最重要的边界：**管理与计算在电脑端，播放设备只访问局域网页面。** 行为变化需要测试；播放链路变化还需要真实 FFmpeg 输出或目标设备证据。
+
+Localis 源码当前保留所有权利，并非 OSI 开源许可证项目。Windows 发行包中的 FFmpeg、ffprobe、Real-ESRGAN、Electron 及其他第三方组件继续遵循各自许可证。详情见 [LICENSE.md](./LICENSE.md) 与 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
 
 <div align="center">
   <br />

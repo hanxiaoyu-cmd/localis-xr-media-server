@@ -255,14 +255,20 @@ jobs:
             throw "Release '$env:RELEASE_TAG' already exists; published assets are immutable."
           }
 
+          $releaseNotesPath = Join-Path $PWD "docs/releases/$env:RELEASE_TAG.md"
+          $notesArguments = if (Test-Path -LiteralPath $releaseNotesPath -PathType Leaf) {
+            @('--notes-file', $releaseNotesPath)
+          } else {
+            @('--generate-notes')
+          }
+
           $ghArguments = @(
             'release', 'create', $env:RELEASE_TAG,
             '--repo', $env:GITHUB_REPOSITORY,
             '--verify-tag',
             '--target', $env:GITHUB_SHA,
-            '--title', "Localis $env:RELEASE_VERSION",
-            '--generate-notes'
-          ) + $assetPaths
+            '--title', "Localis $env:RELEASE_VERSION"
+          ) + $notesArguments + $assetPaths
 
           & gh @ghArguments
           if ($LASTEXITCODE -ne 0) {

@@ -38,7 +38,8 @@ Localis 的 Windows 构建使用同一个公开构建身份贯穿浏览器资源
 2. 同时更新 `package.json` 与 `package-lock.json` 的版本并再次通过 CI。
 3. 在 `main` 对应提交创建并推送唯一的 `v<version>` Tag。
 4. `Release` 工作流会验证 Tag、硬件无关回归、Windows 安装版/便携版、打包载荷、无界面启动后的运行时身份、CycloneDX SBOM 与 SHA-256；真实 AI 推理仍须在有兼容 Vulkan GPU 的验收机执行。
-5. 工作流创建 GitHub Release；若同名 Release 已存在则失败，不覆盖已经发布的资产。
+5. 如存在 `docs/releases/v<version>.md`，工作流将其作为人工整理的 Release Notes；否则使用 GitHub 自动生成说明。
+6. 工作流创建 GitHub Release；若同名 Release 已存在则失败，不覆盖已经发布的资产。
 
 Release 包含四个资产：安装版、便携版、CycloneDX SBOM 和 `SHA256SUMS.txt`。发布后应下载资产重新计算 SHA-256，并与校验文件比对。
 
