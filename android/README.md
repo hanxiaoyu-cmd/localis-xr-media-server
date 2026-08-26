@@ -73,5 +73,6 @@ GitHub Actions 使用 Temurin JDK 17、官方 `gradle/actions/setup-gradle` 和�
 - 除兼容 HLS 外的其他 HLS 路径硬阻断。
 - 配对、Cookie 复用、媒体库和进度写入的请求合同。
 - 兼容 manifest 从 202 轮询到有效 m3u8 后才返回给播放器。
+- 对 chunked/未知长度的 API 和 manifest 响应执行分块读取与硬上限，避免过量内存分配。
 
 真机发布前仍需在目标 Android 头显上验证硬件解码、HDR、长时间 Range 读取、Wi-Fi 漫游、后台恢复和 90 分钟浸泡播放。
