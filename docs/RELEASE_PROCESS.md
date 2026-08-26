@@ -7,7 +7,7 @@ Localis 的 Windows 构建使用同一个公开构建身份贯穿浏览器资源
 `CI` 工作流在拉取请求、`main` 推送和手动触发时使用 Windows runner 执行：
 
 1. `npm ci`
-2. ESLint、TypeScript 和全部测试
+2. ESLint、TypeScript 和全部硬件无关测试；真实 NCNN/Vulkan AI 执行保留给有兼容 GPU 的 Windows 验收机
 3. 生产 Web 构建与桌面服务构建
 4. 构建元数据校验
 5. 前端与服务端编译产物身份一致性校验
@@ -35,7 +35,7 @@ Localis 的 Windows 构建使用同一个公开构建身份贯穿浏览器资源
 1. 通过拉取请求把已通过 CI 的代码合入 `main`。
 2. 同时更新 `package.json` 与 `package-lock.json` 的版本并再次通过 CI。
 3. 在 `main` 对应提交创建并推送唯一的 `v<version>` Tag。
-4. `Release` 工作流会验证 Tag、完整回归、Windows 安装版/便携版、打包载荷、无界面启动后的运行时身份、CycloneDX SBOM 与 SHA-256。
+4. `Release` 工作流会验证 Tag、硬件无关回归、Windows 安装版/便携版、打包载荷、无界面启动后的运行时身份、CycloneDX SBOM 与 SHA-256；真实 AI 推理仍须在有兼容 Vulkan GPU 的验收机执行。
 5. 工作流创建 GitHub Release；若同名 Release 已存在则失败，不覆盖已经发布的资产。
 
 Release 包含四个资产：安装版、便携版、CycloneDX SBOM 和 `SHA256SUMS.txt`。发布后应下载资产重新计算 SHA-256，并与校验文件比对。

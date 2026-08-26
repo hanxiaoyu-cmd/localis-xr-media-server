@@ -90,6 +90,20 @@ async function completePlaylist(directory: string, playlist: string) {
   return (await Promise.all([...names].map((name) => exists(path.join(directory, name))))).every(Boolean);
 }
 
+async function waitForCompletePlaylist(directory: string, playlistPath: string, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const playlist = await readFile(playlistPath, 'utf8');
+      if (await completePlaylist(directory, playlist)) return true;
+    } catch {
+      // FFmpeg may still be completing its final atomic playlist rename.
+    }
+    await wait(25);
+  }
+  return false;
+}
+
 function segmentDuration(job: TranscodeJob, index: number) {
   const segmentSeconds = job.segmentDurationSeconds ?? ON_DEMAND_SEGMENT_SECONDS;
   const duration = job.durationSeconds ?? 0;
@@ -1010,9 +1024,17 @@ export class TranscodeManager {
       job.process = undefined;
       if (job.cancelled) return;
       if (code === 0) {
-        job.state = 'ready';
-        job.progressSeconds = item.duration;
-        void this.pruneCache(job.directory);
+        void waitForCompletePlaylist(job.directory, job.playlistPath).then((complete) => {
+          if (job.cancelled) return;
+          if (!complete) {
+            settled = false;
+            fail('FFmpeg 已退出，但 HLS 播放清单或分片不完整');
+            return;
+          }
+          job.state = 'ready';
+          job.progressSeconds = item.duration;
+          void this.pruneCache(job.directory);
+        });
       } else {
         settled = false;
         fail(stderr.trim() || `FFmpeg exited with code ${code}`);

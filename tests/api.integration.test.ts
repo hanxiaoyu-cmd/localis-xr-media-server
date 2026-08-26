@@ -28,6 +28,34 @@ let mutableSourcePath = '';
 
 const host = (test: request.Test) => test.set('Host', 'localhost');
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const configuredFfmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+const configuredFfprobePath = process.env.FFPROBE_PATH || 'ffprobe';
+const outputProbePath = process.env.LOCALIS_OUTPUT_PROBE_PATH || 'ffprobe';
+
+async function execOutputProbe(arguments_: string[], _options?: { windowsHide?: boolean }) {
+  const probeArguments = [...arguments_];
+  const target = probeArguments.at(-1);
+  if (target?.endsWith('.m3u8')) {
+    const directory = path.dirname(target);
+    const playlist = await readFile(target, 'utf8');
+    const initName = playlist.match(/^#EXT-X-MAP:.*URI="([^"]+)"/m)?.[1];
+    const segmentName = playlist.split(/\r?\n/).map((line) => line.trim())
+      .find((line) => /^seg_\d{6}\.m4s$/.test(line));
+    if (initName === 'init.mp4' && segmentName) {
+      // ffprobe-static 4.x cannot resolve relative fMP4 HLS assets on Windows.
+      // Concatenating the standard init fragment and first media fragment
+      // validates the packaged probe and encoded streams without using a
+      // different machine-wide ffprobe than the application ships.
+      const combinedPath = path.join(directory, '.localis-output-probe.mp4');
+      await writeFile(combinedPath, Buffer.concat(await Promise.all([
+        readFile(path.join(directory, initName)),
+        readFile(path.join(directory, segmentName)),
+      ])));
+      probeArguments[probeArguments.length - 1] = combinedPath;
+    }
+  }
+  return execFileAsync(outputProbePath, probeArguments, { windowsHide: true, encoding: 'utf8' });
+}
 
 beforeAll(async () => {
   tempDir = await mkdtemp(path.join(os.tmpdir(), 'localis-api-'));
@@ -39,7 +67,7 @@ beforeAll(async () => {
     projectRoot: process.cwd(), dataDir: tempDir, cacheDir: path.join(tempDir, 'cache'),
     mediaDirs: [path.join(process.cwd(), 'sample-media'), mutableMediaDir], port: 0, host: '127.0.0.1',
     authDisabled: true, pairingCode: '123456', allowedHosts: ['localhost', '127.0.0.1'],
-    ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', maxTranscodes: 2,
+    ffmpegPath: configuredFfmpegPath, ffprobePath: configuredFfprobePath, maxTranscodes: 2,
     aiSuperResolutionPath: process.platform === 'win32'
       ? path.join(process.cwd(), 'desktop', 'vendor', 'realesrgan', 'realesrgan-ncnn-vulkan.exe')
       : undefined,
@@ -202,9 +230,13 @@ describe('Localis API', () => {
     const playlistResponse = await host(request(api).get(`/api/media/${item.id}/hls/index.m3u8`)).expect(200);
     expect(playlistResponse.text).toContain('#EXT-X-MAP');
     expect(playlistResponse.text).toContain('#EXT-X-ENDLIST');
+    const firstSegment = playlistResponse.text.split(/\r?\n/).map((line) => line.trim())
+      .find((line) => /^seg_\d{6}\.m4s$/.test(line));
+    expect(firstSegment).toBeTruthy();
+    await host(request(api).get(`/api/media/${item.id}/hls/${firstSegment}`)).expect(200);
 
     const job = [...deps.transcodes.jobs.values()].find((candidate) => candidate.itemId === item.id)!;
-    const { stdout } = await execFileAsync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,codec_type,pix_fmt', '-of', 'json', job.playlistPath], { windowsHide: true });
+    const { stdout } = await execOutputProbe(['-v', 'error', '-show_entries', 'stream=codec_name,codec_type,pix_fmt', '-of', 'json', job.playlistPath], { windowsHide: true });
     const probe = JSON.parse(stdout) as { streams: Array<{ codec_name: string; codec_type: string; pix_fmt?: string }> };
     expect(probe.streams).toEqual(expect.arrayContaining([
       expect.objectContaining({ codec_name: 'h264', codec_type: 'video', pix_fmt: 'yuv420p' }),
@@ -235,7 +267,7 @@ describe('Localis API', () => {
     expect(deps.transcodes.jobForItem(item, 'off')).toBeUndefined();
     await host(request(api).get(`/api/media/${item.id}/hls/compat/init.mp4`)).expect(200);
 
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await execOutputProbe([
       '-v', 'error',
       '-show_entries', 'stream=codec_name,codec_type,pix_fmt,width,height,avg_frame_rate',
       '-of', 'json', forcedJob.playlistPath,
@@ -272,7 +304,7 @@ describe('Localis API', () => {
     }
     expect(deps.transcodes.statusForItem(item, 'off')).toMatchObject({ state: 'ready', mode: 'transcode' });
     const job = deps.transcodes.jobForItem(item, 'off')!;
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0',
       '-show_entries', 'stream=codec_name,pix_fmt,color_primaries,color_transfer,color_space,color_range',
       '-of', 'json', job.playlistPath,
@@ -303,7 +335,7 @@ describe('Localis API', () => {
       plan: { outputWidth: plan.outputWidth, outputHeight: plan.outputHeight },
     });
     const job = deps.transcodes.jobForItem(item, 'standard')!;
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,codec_name,pix_fmt,level', '-of', 'json', path.join(job.directory, 'seg_000000.ts'),
     ], { windowsHide: true });
     const encoded = (JSON.parse(stdout) as { streams: Array<{ width: number; height: number; codec_name: string; pix_fmt: string; level: number }> }).streams[0];
@@ -318,14 +350,17 @@ describe('Localis API', () => {
     await host(request(api).get(`/api/media/${spherical.id}/hls/high/seg_000000.ts`)).expect(200);
     const sphericalJob = deps.transcodes.jobForItem(spherical, 'high')!;
     expect(sphericalJob.state).toBe('ready');
-    const sphericalProbe = await execFileAsync('ffprobe', [
+    const sphericalProbe = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', path.join(sphericalJob.directory, 'seg_000000.ts'),
     ], { windowsHide: true });
     expect((JSON.parse(sphericalProbe.stdout) as { streams: Array<{ width: number; height: number }> }).streams[0])
       .toMatchObject({ width: sphericalPlan.outputWidth, height: sphericalPlan.outputHeight });
   });
 
-  it.runIf(process.platform === 'win32')('precomputes every AI segment before publishing a playable HLS manifest', async () => {
+  // Hosted Windows runners do not expose the Vulkan GPU required by the real
+  // NCNN executable. Local/release-device validation keeps this enabled unless
+  // CI explicitly disables only this hardware-bound case.
+  it.runIf(process.platform === 'win32' && process.env.LOCALIS_RUN_AI_INTEGRATION !== '0')('precomputes every AI segment before publishing a playable HLS manifest', async () => {
     const health = await host(request(api).get('/api/health')).expect(200);
     expect(health.body.aiSuperResolution).toMatchObject({
       available: true,
@@ -371,7 +406,7 @@ describe('Localis API', () => {
       plan: { outputWidth: plan.outputWidth, outputHeight: plan.outputHeight },
     });
     const job = deps.transcodes.jobForItem(item, 'ai')!;
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await execOutputProbe([
       '-v', 'error', '-show_entries', 'stream=codec_name,width,height,pix_fmt:format=duration',
       '-of', 'json', path.join(job.directory, 'seg_000000.ts'),
     ], { windowsHide: true });
@@ -411,7 +446,7 @@ describe('Localis API', () => {
     const job = deps.transcodes.jobForItem(item, 'standard')!;
     expect(await access(path.join(job.directory, 'seg_000002.ts')).then(() => true)).toBe(true);
     await expect(access(path.join(job.directory, 'seg_000000.ts'))).rejects.toBeTruthy();
-    const probe = await execFileAsync('ffprobe', [
+    const probe = await execOutputProbe([
       '-v', 'error', '-show_entries', 'format=start_time,duration', '-of', 'json', path.join(job.directory, 'seg_000002.ts'),
     ], { windowsHide: true });
     const format = (JSON.parse(probe.stdout) as { format: { start_time: string; duration: string } }).format;
@@ -451,7 +486,7 @@ describe('Localis API', () => {
     }
     const job = deps.transcodes.jobForItem(deps.library.get(item.id)!)!;
     expect(job.state).toBe('ready');
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', job.playlistPath,
     ], { windowsHide: true });
     const stream = (JSON.parse(stdout) as { streams: Array<{ width: number; height: number }> }).streams[0];
@@ -475,7 +510,7 @@ describe('Localis API', () => {
     }
     const job = deps.transcodes.jobForItem(deps.library.get(item.id)!)!;
     expect(job.state).toBe('ready');
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,pix_fmt', '-of', 'json', job.playlistPath,
     ], { windowsHide: true });
     expect((JSON.parse(stdout) as { streams: Array<{ codec_name: string; pix_fmt: string }> }).streams[0])
@@ -490,7 +525,7 @@ describe('Localis API', () => {
       await wait(100);
     }
     const anamorphicJob = deps.transcodes.jobForItem(deps.library.get(anamorphic.id)!)!;
-    const anamorphicProbe = await execFileAsync('ffprobe', [
+    const anamorphicProbe = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,sample_aspect_ratio', '-of', 'json', anamorphicJob.playlistPath,
     ], { windowsHide: true });
     const display = (JSON.parse(anamorphicProbe.stdout) as { streams: Array<{ width: number; height: number; sample_aspect_ratio: string }> }).streams[0];
@@ -506,7 +541,7 @@ describe('Localis API', () => {
       await wait(100);
     }
     const highFpsJob = deps.transcodes.jobForItem(deps.library.get(highFps.id)!)!;
-    const fpsProbe = await execFileAsync('ffprobe', [
+    const fpsProbe = await execOutputProbe([
       '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=avg_frame_rate', '-of', 'json', highFpsJob.playlistPath,
     ], { windowsHide: true });
     const [numerator, denominator] = (JSON.parse(fpsProbe.stdout) as { streams: Array<{ avg_frame_rate: string }> }).streams[0].avg_frame_rate.split('/').map(Number);
