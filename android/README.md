@@ -59,7 +59,7 @@ Windows：
 
 不可调试的 Beta APK 位于 `app/build/outputs/apk/beta/app-beta.apk`。安装后确保 Android 设备与运行 Localis 的电脑处于同一局域网，并允许电脑防火墙放行 Localis 端口。日常开发仍可单独运行 `assembleDebug`。
 
-GitHub Actions 仅使用仓库策略允许的 GitHub 官方 `actions/*`：Temurin JDK 17 与 Gradle 缓存由 `actions/setup-java` 配置，Android SDK 由 Runner 内置 `sdkmanager` 安装，构建使用仓库内 Wrapper。每次推送 `Android_beta` 后，Actions 会上传保留 14 天的 `Localis-Android-beta-<commit>` 安装包与 SHA-256 文件。
+GitHub Actions 在已登记的 `CI` 工作流中为 `Android_beta` 分支运行独立 Android Job，仅使用仓库策略允许的 GitHub 官方 `actions/*`：Temurin JDK 17 与 Gradle 缓存由 `actions/setup-java` 配置，Android SDK 由 Runner 内置 `sdkmanager` 安装，构建使用仓库内 Wrapper。每次推送 `Android_beta` 后，Actions 会上传保留 14 天的 `Localis-Android-beta-<commit>` 安装包与 SHA-256 文件。
 
 当前 CI 产物本身不可调试，但仍使用 Runner 临时 Debug 密钥签名，只适合 Beta 验证。不同 CI 构建可能无法直接覆盖安装，届时需要卸载旧版（应用内保存的服务器地址和会话也会被清除）；建立长期 Beta/正式发布前需配置受保护且持续备份的固定签名密钥。
 

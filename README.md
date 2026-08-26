@@ -18,7 +18,7 @@
   <br />
 
   [![Windows verification](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/ci.yml/badge.svg)](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/ci.yml)
-  [![Android beta](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/android.yml/badge.svg?branch=Android_beta)](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/android.yml)
+  [![Android beta](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/ci.yml/badge.svg?branch=Android_beta)](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/ci.yml)
   [![Latest release](https://img.shields.io/github/v/release/hanxiaoyu-cmd/localis-xr-media-server?display_name=tag&style=flat-square&label=release&color=111111)](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest)
   ![Windows x64](https://img.shields.io/badge/Windows-x64-111111?style=flat-square)
   ![Android beta](https://img.shields.io/badge/Android-beta-B8FF5C?style=flat-square&labelColor=111111)
