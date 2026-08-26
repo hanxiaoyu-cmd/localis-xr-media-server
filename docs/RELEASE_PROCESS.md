@@ -14,6 +14,8 @@ Localis 的 Windows 构建使用同一个公开构建身份贯穿浏览器资源
 
 受保护分支要求的检查名称为 GitHub 实际创建的 `Windows verification`；配置分支保护时必须从一次真实运行读取检查名称和 Actions App ID，不能只依据本文猜测。
 
+`main` 当前要求通过拉取请求合并、分支保持最新、`Windows verification` 成功且讨论全部解决；规则同时约束管理员，并禁止强推和删除。仓库 Actions 策略只允许 GitHub 官方 Action，且所有 `uses:` 引用必须固定到完整 commit SHA。
+
 ## 构建身份
 
 `npm run build:metadata` 原子生成 `desktop/build/build-metadata.json`，公开字段固定为：
