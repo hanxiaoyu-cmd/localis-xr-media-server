@@ -49,3 +49,10 @@ next-env.d.ts
 /work/
 /release/
 /desktop/build/
+
+# Android Studio and Gradle
+/android/.gradle/
+/android/.idea/
+/android/local.properties
+/android/**/build/
+*.iml

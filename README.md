@@ -13,13 +13,15 @@
 
   <br />
 
-  [下载最新版](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) · [文档中心](./docs/README.md) · [测试报告](./docs/TEST_REPORT.md) · [路线图](./docs/ROADMAP.md)
+  [下载最新版](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) · [Android Beta](./android/README.md) · [文档中心](./docs/README.md) · [测试报告](./docs/TEST_REPORT.md) · [路线图](./docs/ROADMAP.md)
 
   <br />
 
   [![Windows verification](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/ci.yml/badge.svg)](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/ci.yml)
+  [![Android beta](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/android.yml/badge.svg?branch=Android_beta)](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/actions/workflows/android.yml)
   [![Latest release](https://img.shields.io/github/v/release/hanxiaoyu-cmd/localis-xr-media-server?display_name=tag&style=flat-square&label=release&color=111111)](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest)
   ![Windows x64](https://img.shields.io/badge/Windows-x64-111111?style=flat-square)
+  ![Android beta](https://img.shields.io/badge/Android-beta-B8FF5C?style=flat-square&labelColor=111111)
   ![Private LAN](https://img.shields.io/badge/network-private_LAN-B8FF5C?style=flat-square&labelColor=111111&color=B8FF5C)
 </div>
 
@@ -30,6 +32,8 @@
 Localis 把复杂的事情留给电脑：媒体扫描、格式判断、FFmpeg 转码、Real-ESRGAN 增强、网盘授权与缓存都发生在 Windows 主机。播放端只打开网页，接收最终可播放的媒体流。
 
 > “零安装”指 Vision Pro、Quest、PICO 等播放端无需安装 Localis App、扩展或 AI 运行时。作为网关的 Windows 电脑仍需运行安装版或便携版 Localis。
+
+`Android_beta` 分支另提供一个可选的原生 Android 基础播放器，面向更稳定的手机/平板直放体验。它只负责连接、配对、浏览媒体库和基础播放，不包含超分、AI、网盘管理、WebXR 或 VR 沉浸界面；XR 设备的零安装网页入口仍是产品主路径。详见 [Android Beta 使用说明](./android/README.md)。
 
 ```mermaid
 flowchart LR
