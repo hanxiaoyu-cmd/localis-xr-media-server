@@ -2,6 +2,13 @@
 
 Localis 的重要变更记录在这里。版本遵循 [Semantic Versioning](https://semver.org/)，发布日期使用北京时间对应的自然日。
 
+## [0.4.1] - 2026-08-26
+
+### 修复
+
+- Windows 打包命令显式禁用 electron-builder 的标签隐式发布，确保它只生成安装版与便携版，GitHub Release 仍由后续受控步骤统一校验并上传。
+- `v0.4.0` 标签因上述自动化问题没有创建 GitHub Release；`v0.4.1` 是包含下方全部 0.4 功能的首个公开安装包版本。
+
 ## [0.4.0] - 2026-08-26
 
 ### 新增
@@ -25,4 +32,5 @@ Localis 的重要变更记录在这里。版本遵循 [Semantic Versioning](http
 - Vision Pro、Quest、PICO 的真实设备兼容、HDR 观感、90 分钟稳定性和真实网盘账号闭环仍需按验收清单完成；本版本不将自动化结果宣传为真机认证。
 - Windows 安装包尚未提供商业代码签名，首次运行可能出现 SmartScreen 提示；请从 GitHub Releases 下载并核对 SHA-256。
 
-[0.4.0]: https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/tag/v0.4.0
+[0.4.1]: https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/tag/v0.4.1
+[0.4.0]: https://github.com/hanxiaoyu-cmd/localis-xr-media-server/tree/v0.4.0
