@@ -138,7 +138,7 @@ kbd { padding: 3px 6px; border: 1px solid #303238; border-radius: 5px; color: #6
 .folder-browser-close { width: 34px; height: 34px; align-self: start; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: #777681; font-size: 22px; line-height: 1; cursor: pointer; }
 .folder-browser-close:hover, .folder-browser-close:focus-visible { border-color: rgba(170,152,255,.22); outline: 0; background: rgba(170,152,255,.07); color: #d8d1ff; }
 .folder-browser-layout { min-height: 0; flex: 1; display: grid !important; grid-template-columns: 190px minmax(0, 1fr); justify-content: stretch !important; gap: 0 !important; }
-.folder-locations { min-width: 0; padding: 19px 14px; overflow: auto; border-right: 1px solid rgba(255,255,255,.07); background: rgba(8,8,12,.26); }
+.folder-locations { min-width: 0; padding: 19px 14px; overflow: auto; border-right: 1px solid rgba(255,255,255,.07); background: rgba(8,8,12,.26); scrollbar-width: thin; scrollbar-color: #383440 transparent; }
 .folder-browser-label { display: block; margin: 0 7px 10px; color: #65636e; font-size: 8px; font-weight: 750; letter-spacing: 1.25px; text-transform: uppercase; }
 .folder-locations > div { display: grid; gap: 4px; }
 .folder-locations button { width: 100%; min-height: 38px; display: grid; grid-template-columns: 27px minmax(0, 1fr); align-items: center; gap: 7px; padding: 0 9px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: #8e8c97; text-align: left; font-size: 10px; cursor: pointer; }
@@ -168,6 +168,10 @@ kbd { padding: 3px 6px; border: 1px solid #303238; border-radius: 5px; color: #6
 .folder-browser-toolbar button span { margin-right: 4px; color: var(--folder-violet); }
 .folder-browser-toolbar > span { color: #5e5c65; font-size: 8px; }
 .folder-list { min-height: 0; flex: 1; overflow-y: auto; display: grid; align-content: start; gap: 5px; padding-right: 4px; scrollbar-width: thin; scrollbar-color: #383440 transparent; }
+.folder-locations::-webkit-scrollbar, .folder-list::-webkit-scrollbar, .folder-breadcrumbs::-webkit-scrollbar { width: 7px; height: 7px; }
+.folder-locations::-webkit-scrollbar-track, .folder-list::-webkit-scrollbar-track, .folder-breadcrumbs::-webkit-scrollbar-track { background: transparent; }
+.folder-locations::-webkit-scrollbar-thumb, .folder-list::-webkit-scrollbar-thumb, .folder-breadcrumbs::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: #4a4553; background-clip: content-box; }
+.folder-locations::-webkit-scrollbar-button, .folder-list::-webkit-scrollbar-button, .folder-breadcrumbs::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
 .folder-list > button { width: 100%; min-height: 51px; display: grid; grid-template-columns: 30px minmax(0, 1fr) 20px; align-items: center; gap: 11px; padding: 8px 11px; border: 1px solid #2c2b32; border-radius: 10px; background: linear-gradient(90deg, #14151a, #121318); color: #888590; text-align: left; cursor: pointer; }
 .folder-list > button:hover, .folder-list > button:focus-visible { border-color: rgba(170,152,255,.28); outline: 0; background: linear-gradient(90deg, rgba(170,152,255,.085), rgba(32,29,42,.55)); }
 .browser-folder-icon { width: 20px; height: 14px; margin-left: 3px; color: #9c8fe3; }
