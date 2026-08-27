@@ -1,3 +1,7 @@
 <resources>
-    <string name="app_name">Localis Player Beta</string>
+    <string name="app_name">Localis XR Server</string>
+    <string name="server_notification_channel">局域网媒体服务器</string>
+    <string name="server_notification_channel_description">Localis 在局域网提供已授权媒体文件</string>
+    <string name="server_notification_title">Localis 局域网服务器运行中</string>
+    <string name="server_notification_stop">停止共享</string>
 </resources>

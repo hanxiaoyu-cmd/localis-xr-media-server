@@ -13,7 +13,7 @@
 
   <br />
 
-  [下载最新版](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) · [Android Beta](./android/README.md) · [文档中心](./docs/README.md) · [测试报告](./docs/TEST_REPORT.md) · [路线图](./docs/ROADMAP.md)
+  [下载最新版](https://github.com/hanxiaoyu-cmd/localis-xr-media-server/releases/latest) · [Android Server Beta](./android/README.md) · [文档中心](./docs/README.md) · [测试报告](./docs/TEST_REPORT.md) · [路线图](./docs/ROADMAP.md)
 
   <br />
 
@@ -33,7 +33,7 @@ Localis 把复杂的事情留给电脑：媒体扫描、格式判断、FFmpeg �
 
 > “零安装”指 Vision Pro、Quest、PICO 等播放端无需安装 Localis App、扩展或 AI 运行时。作为网关的 Windows 电脑仍需运行安装版或便携版 Localis。
 
-`Android_beta` 分支另提供一个可选的原生 Android 基础播放器，面向更稳定的手机/平板直放体验。它只负责连接、配对、浏览媒体库和基础播放，不包含超分、AI、网盘管理、WebXR 或 VR 沉浸界面；XR 设备的零安装网页入口仍是产品主路径。详见 [Android Beta 使用说明](./android/README.md)。
+`Android_beta` 分支另提供 Localis Android Server：安卓手机或平板作为局域网媒体服务器，Quest、PICO 和 Vision Pro 只需在浏览器打开它显示的地址，无需在头显安装 Localis。它仅提供私有文件夹索引、配对、Range 原片传输、续播和 WebXR 网页，不包含转码、超分、AI 或网盘。详见 [Android Server Beta 使用说明](./android/README.md)。
 
 ```mermaid
 flowchart LR

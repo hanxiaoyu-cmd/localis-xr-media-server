@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "incremental": false,
+    "plugins": [],
+    "types": ["webxr"]
+  },
+  "include": [
+    "./**/*.ts",
+    "../../app/lib/xr-video-stage.ts",
+    "../../server/types.ts"
+  ]
+}

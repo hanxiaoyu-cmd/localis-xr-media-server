@@ -14,6 +14,7 @@
     "dev:server": "tsx watch server/index.ts",
     "local": "concurrently -k -s first \"npm:dev:web\" \"npm:dev:server\"",
     "build:metadata": "tsx scripts/generate-build-metadata.ts",
+    "build:android-web": "node android/web-src/build.mjs",
     "verify:build-metadata": "tsx scripts/verify-build-metadata.ts",
     "verify:build-artifacts": "tsx scripts/verify-build-artifacts.ts",
     "build:web": "tsx scripts/build-web.ts",

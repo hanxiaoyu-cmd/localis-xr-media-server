@@ -1,4 +1,4 @@
 -keepattributes *Annotation*
--keepclassmembers class com.localis.xrplayer.data.** {
+-keepclassmembers class com.localis.xrserver.data.** {
     <fields>;
 }
